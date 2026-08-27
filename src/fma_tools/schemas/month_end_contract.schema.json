@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Month-end pack contract",
+  "type": "object",
+  "required": ["entity", "period", "tax_basis", "pnl", "balance_sheet", "cash_flow",
+               "aged_receivables", "flows", "xero_controls"],
+  "properties": {
+    "entity": {"type": "string", "minLength": 1},
+    "book": {"type": "string"},
+    "period": {"type": "object"},
+    "tax_basis": {"enum": ["modelled", "actual", "pre_tax"]},
+    "pnl": {
+      "type": "object",
+      "required": ["month_actual", "month_budget", "ytd_actual", "ytd_budget", "prior_fy"],
+      "properties": {
+        "month_actual": {"$ref": "#/$defs/pnl_period"},
+        "month_budget": {"$ref": "#/$defs/pnl_period"},
+        "ytd_actual": {"$ref": "#/$defs/pnl_period"},
+        "ytd_budget": {"$ref": "#/$defs/pnl_period"},
+        "prior_fy": {"$ref": "#/$defs/pnl_period"}
+      }
+    },
+    "balance_sheet": {
+      "type": "object",
+      "required": ["current", "prior_month"],
+      "properties": {
+        "current": {"$ref": "#/$defs/bs_side"},
+        "prior_month": {"$ref": "#/$defs/bs_side"}
+      }
+    },
+    "cash_flow": {
+      "type": "object",
+      "required": ["opening_cash", "closing_cash", "net_movement",
+                   "operating", "investing", "financing"],
+      "properties": {
+        "opening_cash": {"type": "number"},
+        "closing_cash": {"type": "number"},
+        "net_movement": {"type": "number"},
+        "operating": {
+          "type": "object",
+          "required": ["npat", "depreciation_amortisation",
+                       "working_capital_movement", "net_operating"],
+          "additionalProperties": {"type": "number"}
+        },
+        "investing": {
+          "type": "object",
+          "required": ["capex", "net_investing"],
+          "additionalProperties": {"type": "number"}
+        },
+        "financing": {
+          "type": "object",
+          "required": ["loan_movement", "net_financing"],
+          "additionalProperties": {"type": "number"}
+        }
+      }
+    },
+    "aged_receivables": {
+      "type": "object",
+      "required": ["buckets", "overdue_total"],
+      "properties": {
+        "buckets": {
+          "type": "object",
+          "required": ["current", "d1_30", "d31_60", "d61_90", "d90_plus", "total"],
+          "additionalProperties": {"type": "number"}
+        },
+        "overdue_total": {"type": "number"},
+        "top_overdue": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["customer", "amount", "days"],
+            "properties": {
+              "customer": {"type": "string"},
+              "amount": {"type": "number"},
+              "days": {"type": "number"}
+            }
+          }
+        }
+      }
+    },
+    "flows": {
+      "type": "object",
+      "required": ["capex", "depreciation_ppe", "amortisation"],
+      "properties": {
+        "capex": {"type": "number"},
+        "depreciation_ppe": {"type": "number"},
+        "amortisation": {"type": "number"},
+        "dividends": {"type": "number"},
+        "assumed_tax_rate": {"type": "number"},
+        "other_non_current_assets_movement": {"type": "number"}
+      }
+    },
+    "xero_controls": {
+      "type": "object",
+      "required": ["current_year_earnings"],
+      "properties": {"current_year_earnings": {"type": "number"}}
+    },
+    "disclosed_differences": {"$ref": "#/$defs/disclosures"}
+  },
+  "$defs": {
+    "pnl_period": {
+      "type": "object",
+      "required": ["revenue", "cogs", "gross_profit", "opex", "opex_total", "ebitda",
+                   "depreciation_amortisation", "ebit", "net_interest",
+                   "profit_before_tax", "income_tax", "npat"],
+      "properties": {
+        "opex": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"type": "number"}
+        }
+      }
+    },
+    "bs_side": {
+      "type": "object",
+      "required": ["assets", "liabilities", "equity"],
+      "properties": {
+        "assets": {
+          "type": "object",
+          "required": ["cash", "trade_receivables", "work_in_progress",
+                       "other_current_assets", "ppe_net", "intangibles",
+                       "total_current_assets", "total_non_current_assets",
+                       "total_assets"],
+          "additionalProperties": {"type": "number"}
+        },
+        "liabilities": {
+          "type": "object",
+          "required": ["trade_payables", "gst_payg_payable", "accrued_expenses",
+                       "short_term_borrowings", "long_term_borrowings", "provisions",
+                       "total_current_liabilities", "total_non_current_liabilities",
+                       "total_liabilities"],
+          "additionalProperties": {"type": "number"}
+        },
+        "equity": {
+          "type": "object",
+          "required": ["share_capital", "retained_earnings", "total_equity"],
+          "additionalProperties": {"type": "number"}
+        }
+      }
+    },
+    "disclosures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "amount", "note"],
+        "properties": {
+          "check": {"type": "string", "minLength": 1},
+          "amount": {"type": "number"},
+          "note": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}
