@@ -86,6 +86,59 @@ def test_cross_sheet_reference_refuses(build_xlsx, run_cli):
     assert env["problems"][0]["code"] == "FORMULA_UNEVALUATED"
 
 
+def test_array_formula_refuses_never_a_repr(build_xlsx, run_cli, tmp_path):
+    import openpyxl
+    from openpyxl.worksheet.formula import ArrayFormula
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"], ws["A2"] = 1.0, 2.0
+    ws["A3"] = ArrayFormula("A3", "=SUM(A1:A2)")
+    path = tmp_path / "array.xlsx"
+    wb.save(path)
+    code, env = run_cli(["read-ledger", str(path)])
+    assert code == 1
+    assert env["problems"][0]["code"] == "FORMULA_UNEVALUATED"
+    assert "array" in env["problems"][0]["message"].lower()
+
+
+def test_literal_text_starting_with_equals_stays_text(run_cli, tmp_path):
+    """A quote-prefixed literal like '=A1+10' is TEXT in Excel. Evaluating it would
+    fabricate a number; a real formula referencing it must refuse (#VALUE!)."""
+    import xlsxwriter
+    path = tmp_path / "literal.xlsx"
+    wb = xlsxwriter.Workbook(str(path))
+    ws = wb.add_worksheet("Sheet1")
+    ws.write_number(0, 0, 5.0)
+    ws.write_string(1, 0, "=A1+10")
+    wb.close()
+    code, env = run_cli(["read-ledger", str(path)])
+    assert code == 0
+    assert cell(env, "A2") == "=A1+10"        # text, not 15.0
+    assert sheet(env)["formula_count"] == 0
+
+    wb = __import__("openpyxl").load_workbook(path)
+    wb["Sheet1"]["B1"] = "=A2*2"              # a real formula over the text cell
+    wb.save(path)
+    code, env = run_cli(["read-ledger", str(path)])
+    assert code == 1
+    assert "#VALUE!" in env["problems"][0]["message"]
+
+
+def test_date_inside_sum_refuses(build_xlsx, run_cli):
+    path = build_xlsx({"A1": 10.0, "A2": datetime(2026, 7, 31), "A3": 5.0,
+                       "A4": "=SUM(A1:A3)"})
+    code, env = run_cli(["read-ledger", str(path)])
+    assert code == 1
+    assert "serial" in env["problems"][0]["message"]
+
+
+def test_row_zero_reference_refuses(build_xlsx, run_cli):
+    path = build_xlsx({"B2": "=A0"})
+    code, env = run_cli(["read-ledger", str(path)])
+    assert code == 1
+    assert "row 0" in env["problems"][0]["message"]
+
+
 # ── Excel semantics deliberately kept ────────────────────────────────────────
 
 def test_blank_reference_is_zero(build_xlsx, run_cli):
@@ -173,6 +226,19 @@ def test_expect_date_with_unreadable_header_refuses(build_xlsx, run_cli):
     code, env = run_cli(["read-ledger", str(path), "--expect-date", "2026-06-30"])
     assert code == 1
     assert env["problems"][0]["code"] == "DATE_MISMATCH"
+
+
+def test_expect_date_checks_every_sheet(build_xlsx, run_cli):
+    """A wrong-dated SECOND sheet must refuse -- this gate exists because nothing
+    downstream detects a wrong-dated export."""
+    path = build_xlsx(_HEADER, extra_sheets={"PL": {
+        "A1": "Profit and Loss", "A2": "Fixture Pty Ltd",
+        "A3": "As at 31 July 2026", "A5": "Account", "B5": "Jul", "A6": "Sales",
+        "B6": 1.0}})
+    code, env = run_cli(["read-ledger", str(path), "--expect-date", "2026-06-30"])
+    assert code == 1
+    msg = env["problems"][0]["message"]
+    assert "'PL'" in msg and "2026-07-31" in msg
 
 
 def test_no_date_without_flag_is_a_warning(build_xlsx, run_cli):

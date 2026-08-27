@@ -34,30 +34,36 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor.add_arguments(sp)
     sp.set_defaults(run=doctor.run, summary=doctor.summary)
 
-    try:
-        from .reconcile import main as reconcile_main
-    except ImportError:
-        reconcile_main = None
-    if reconcile_main is not None:
-        sp = sub.add_parser("reconcile",
-                            help="run a pack's arithmetic ties; refuse if one breaks")
-        reconcile_main.add_arguments(sp)
-        sp.set_defaults(run=reconcile_main.run, summary=reconcile_main.summary)
+    # imported unconditionally: a guard that silently deletes a subcommand turns a
+    # broken install into an argparse "invalid choice" with no fix line
+    from .reconcile import main as reconcile_main
+    sp = sub.add_parser("reconcile",
+                        help="run a pack's arithmetic ties; refuse if one breaks")
+    reconcile_main.add_arguments(sp)
+    sp.set_defaults(run=reconcile_main.run, summary=reconcile_main.summary)
 
-    try:
-        from .render import main as render_main
-    except ImportError:
-        render_main = None
-    if render_main is not None:
-        sp = sub.add_parser("render", help="turn finished HTML into PDF, DOCX or PPTX")
-        render_main.add_arguments(sp)
-        sp.set_defaults(run=render_main.run, summary=render_main.summary)
+    from .render import main as render_main
+    sp = sub.add_parser("render", help="turn finished HTML into PDF, DOCX or PPTX")
+    render_main.add_arguments(sp)
+    sp.set_defaults(run=render_main.run, summary=render_main.summary)
 
     return p
 
 
 def main(argv=None) -> int:
-    args = _build_parser().parse_args(argv)
+    try:
+        args = _build_parser().parse_args(argv)
+    except SystemExit as e:
+        if e.code in (0, None):          # --help / --version: human output is the point
+            raise
+        # a usage error must still honour the contract: valid JSON on stdout
+        envelope = {"tool": "fma", "version": __version__, "status": "error",
+                    "data": {}, "warnings": [],
+                    "problems": [{"code": "USAGE",
+                                  "message": "invalid arguments -- see the usage "
+                                             "text on stderr, or `fma --help`"}]}
+        print(json.dumps(envelope, indent=1))
+        return 2
     envelope = {"tool": args.tool, "version": __version__, "status": "ok",
                 "data": {}, "problems": [], "warnings": []}
     exit_code = 0

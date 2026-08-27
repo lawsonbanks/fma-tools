@@ -27,6 +27,13 @@ def add_arguments(p) -> None:
     p.add_argument("--ties", help="assert: the ties spec JSON")
 
 
+def _refuse_constant(s: str):
+    # Python's json accepts NaN/Infinity literals, and NaN passes every |a-b|>tol
+    # comparison as "no break" -- a contract full of NaN would tie perfectly.
+    raise InputProblem("CONTRACT_INVALID",
+                       f"{s} is not a number a contract can carry")
+
+
 def _load(path_str: str | None, what: str) -> dict | list:
     if not path_str:
         raise InputProblem("CONTRACT_INVALID", f"{what} is required for this mode")
@@ -34,7 +41,7 @@ def _load(path_str: str | None, what: str) -> dict | list:
     if not p.exists():
         raise InputProblem("CANNOT_OPEN", f"no file at {p}")
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(), parse_constant=_refuse_constant)
     except (OSError, json.JSONDecodeError) as e:
         raise InputProblem("CANNOT_OPEN", f"cannot read {p}: {e}")
 

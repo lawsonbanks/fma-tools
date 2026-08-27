@@ -23,6 +23,11 @@ class SheetGrid:
     name: str
     grid: list[list]
     merged_count: int
+    # (row, col) of every REAL formula cell (openpyxl data_type 'f'). Load-bearing:
+    # a TEXT cell whose literal content starts with "=" (a quote-prefixed string,
+    # data_type 's') is indistinguishable from a formula by value alone, and
+    # evaluating it would fabricate a number Excel displays as text.
+    formula_mask: set
 
 
 def load(path: Path, sheet: str | None = None) -> list[SheetGrid]:
@@ -60,7 +65,15 @@ def load(path: Path, sheet: str | None = None) -> list[SheetGrid]:
 
     out = []
     for ws in sheets:
-        grid = [list(r) for r in ws.iter_rows(values_only=True)]
+        grid, mask = [], set()
+        for r, row in enumerate(ws.iter_rows()):
+            vals = []
+            for c, cell in enumerate(row):
+                vals.append(cell.value)
+                if cell.data_type == "f":
+                    mask.add((r, c))
+            grid.append(vals)
         out.append(SheetGrid(name=ws.title, grid=grid,
-                             merged_count=len(ws.merged_cells.ranges)))
+                             merged_count=len(ws.merged_cells.ranges),
+                             formula_mask=mask))
     return out

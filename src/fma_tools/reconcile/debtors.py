@@ -86,8 +86,11 @@ def load_detail_doc(path_str: str) -> dict:
     if not p.exists():
         raise InputProblem("CANNOT_OPEN", f"detail_source {p} does not exist — pass "
                            "the JSON written by `fma read-ledger --out`")
+    def _refuse_constant(s):
+        raise InputProblem("CONTRACT_INVALID",
+                           f"{s} in {p.name} is not a number a data document can carry")
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(), parse_constant=_refuse_constant)
     except (OSError, json.JSONDecodeError) as e:
         raise InputProblem("CANNOT_OPEN", f"cannot read detail_source {p}: {e}")
 

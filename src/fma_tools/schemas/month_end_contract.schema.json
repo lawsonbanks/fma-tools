@@ -61,7 +61,12 @@
         "buckets": {
           "type": "object",
           "required": ["current", "d1_30", "d31_60", "d61_90", "d90_plus", "total"],
-          "additionalProperties": {"type": "number"}
+          "additionalProperties": false,
+          "properties": {
+            "current": {"type": "number"}, "d1_30": {"type": "number"},
+            "d31_60": {"type": "number"}, "d61_90": {"type": "number"},
+            "d90_plus": {"type": "number"}, "total": {"type": "number"}
+          }
         },
         "overdue_total": {"type": "number"},
         "top_overdue": {

@@ -1,6 +1,6 @@
 [project]
 name = "fma-tools"
-version = "0.2.0"
+version = "0.3.0"
 description = "FMA delivery gates: read-ledger, reconcile, render, doctor."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -17,7 +17,7 @@ dependencies = [
 fma = "fma_tools.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "xlsxwriter>=3.2"]
 
 [build-system]
 requires = ["hatchling"]

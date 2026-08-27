@@ -270,38 +270,67 @@ def _cye_check(c) -> CheckResult:
                ytd, cye, detail=detail)
 
 
-def checks(c: dict, disc: Disclosures) -> list[CheckResult]:
+def checks(c: dict, disc: Disclosures, *, with_cye: bool = True) -> list[CheckResult]:
     if c["tax_basis"] not in ("modelled", "actual", "pre_tax"):
         # Whitelist the basis: an unrecognised value (e.g. the typo "modeled") must
         # NOT silently skip the checks the field governs. Refuse instead.
         raise InputProblem("CONTRACT_INVALID",
                            f"unknown tax_basis {c['tax_basis']!r} "
                            "(expected 'modelled', 'actual' or 'pre_tax')")
-    return ([_cye_check(c)] + _pnl_checks(c) + _balance_sheet_checks(c)
+    if c["tax_basis"] == "modelled" and not c["flows"].get("assumed_tax_rate"):
+        # A missing (or zero) rate would silently skip the effective-rate check the
+        # basis exists to enforce. Refuse instead.
+        raise InputProblem("CONTRACT_INVALID",
+                           "tax_basis 'modelled' requires flows.assumed_tax_rate")
+    head = [_cye_check(c)] if with_cye else []
+    return (head + _pnl_checks(c) + _balance_sheet_checks(c)
             + _cash_flow_checks(c) + _aged_checks(c) + _consolidation_checks(c, disc))
 
 
 # ---------------------------------------------------------------- display verification
 # The round-once discipline as VERIFICATION, not computation: the agent produces the
 # whole-dollar display copy; this proves (a) every tie still holds on it, (b) every
-# non-plug input leaf equals round(true), (c) residuals sit only in the named plugs.
+# non-plug input leaf equals round(true), (c) residuals sit only in the named plugs,
+# and (d) the display copy's disclosed differences are the TRUE contract's, rounded --
+# a finding cannot be silently absorbed into a plug on the printed face, and a
+# disclosure cannot be fabricated for the face alone.
+#
+# Leaf coverage is what makes every non-leaf figure FORCED: with the leaves pinned to
+# round(true) and the display ties holding, each derived figure and each plug has
+# exactly one value. Prior-side ppe_net/intangibles are leaves (the current side rolls
+# from them through leaf-checked flows); every opex line is a leaf except the one
+# named P&L plug; the CYE control is a leaf (its display cross-tie is NOT re-run --
+# independent roundings of the same total legitimately differ by a dollar, which is
+# the one place the old ordering contract skipped the cross-gate too).
 
-_INPUT_LEAVES = (
-    [("pnl", p, k) for p in PERIODS
-     for k in ("revenue", "cogs", "depreciation_amortisation", "net_interest", "income_tax")]
-    + [("balance_sheet", side, grp, k)
-       for side in ("current", "prior_month")
-       for grp, keys in (
-           ("assets", ("cash", "trade_receivables", "work_in_progress",
-                       "other_current_assets", "other_non_current_assets")),
-           ("liabilities", ("trade_payables", "gst_payg_payable", "accrued_expenses",
-                            "income_tax_payable", "short_term_borrowings",
-                            "long_term_borrowings", "provisions")),
-           ("equity", ("share_capital",)))
-       for k in keys]
-    + [("aged_receivables", "buckets", k) for k in ("current", "d1_30", "d31_60", "d61_90")]
-    + [("flows", k) for k in ("capex", "depreciation_ppe", "amortisation", "dividends")]
-)
+
+def _input_leaves(c: dict) -> list[tuple]:
+    leaves = [("pnl", p, k) for p in PERIODS
+              for k in ("revenue", "cogs", "depreciation_amortisation",
+                        "net_interest", "income_tax")]
+    for p in PERIODS:
+        for k in c["pnl"][p]["opex"]:
+            if ("pnl", p, "opex", k) not in DISPLAY_PLUGS:
+                leaves.append(("pnl", p, "opex", k))
+    leaves += [("balance_sheet", side, grp, k)
+               for side in ("current", "prior_month")
+               for grp, keys in (
+                   ("assets", ("cash", "trade_receivables", "work_in_progress",
+                               "other_current_assets", "other_non_current_assets")),
+                   ("liabilities", ("trade_payables", "gst_payg_payable",
+                                    "accrued_expenses", "income_tax_payable",
+                                    "short_term_borrowings", "long_term_borrowings",
+                                    "provisions")),
+                   ("equity", ("share_capital",)))
+               for k in keys]
+    leaves += [("balance_sheet", "prior_month", "assets", k)
+               for k in ("ppe_net", "intangibles")]
+    leaves += [("aged_receivables", "buckets", k)
+               for k in ("current", "d1_30", "d31_60", "d61_90")]
+    leaves += [("flows", k) for k in ("capex", "depreciation_ppe", "amortisation",
+                                      "dividends")]
+    leaves.append(("xero_controls", "current_year_earnings"))
+    return leaves
 
 
 def _dig(doc, path):
@@ -315,20 +344,47 @@ def _dig(doc, path):
 
 def display_checks(true_c: dict, display_c: dict) -> list[CheckResult]:
     out = []
+    # (d) the display copy's disclosures ARE the true contract's, rounded. Without
+    # this, a client-records finding the pack must print can be dropped from the
+    # face and absorbed into a plug, or a disclosure can be fabricated for the face
+    # that the true book never needed.
+    true_disc: dict[str, float] = {}
+    for d in true_c.get("disclosed_differences", []):
+        true_disc[d["check"]] = true_disc.get(d["check"], 0.0) + float(d["amount"])
+    disp_disc_amounts: dict[str, float] = {}
+    for d in display_c.get("disclosed_differences", []):
+        disp_disc_amounts[d["check"]] = (disp_disc_amounts.get(d["check"], 0.0)
+                                         + float(d["amount"]))
+    for check_id in sorted(set(true_disc) | set(disp_disc_amounts)):
+        if check_id not in disp_disc_amounts:
+            out.append(fact(f"display.disclosure.{check_id}",
+                            f"display carries the disclosed difference on {check_id}",
+                            False, "the finding was dropped from the printed face"))
+        elif check_id not in true_disc:
+            out.append(fact(f"display.disclosure.{check_id}",
+                            f"display disclosure on {check_id} exists in the contract",
+                            False, "a disclosure fabricated for the face alone"))
+        else:
+            want = float(round(true_disc[check_id]))
+            got = disp_disc_amounts[check_id]
+            out.append(fact(f"display.disclosure.{check_id}",
+                            f"display disclosure on {check_id} = round(true)",
+                            abs(got - want) <= CENT, f"display {got} vs {want}"))
     # (a) the full tie set holds on the printed face (dollar values, so effectively
-    # exact at CENT). Stronger than the engine this replaces, which skipped the
-    # cross-statement gates on the rounded copy — safe then only because the
-    # producer was trusted code; the producer is now untrusted. The display copy
-    # states its own (rounded) disclosed differences.
+    # exact at CENT) -- except the CYE cross-tie, replaced by the CYE leaf: two
+    # independent roundings of the same year legitimately differ by a dollar.
+    # Stronger than the engine this replaces, which skipped ALL cross-statement
+    # gates on the rounded copy — safe then only because the producer was trusted
+    # code; the producer is now untrusted.
     disp_disc = Disclosures(display_c.get("disclosed_differences"),
                             non_disclosable=NON_DISCLOSABLE)
-    for chk in checks(display_c, disp_disc):
+    for chk in checks(display_c, disp_disc, with_cye=False):
         chk.id = "display." + chk.id
         chk.name = "display: " + chk.name
         out.append(chk)
     disp_disc.assert_all_consumed()
     # (b) round-once fidelity on every non-plug input leaf
-    for path in _INPUT_LEAVES:
+    for path in _input_leaves(true_c):
         t, d = _dig(true_c, path), _dig(display_c, path)
         if t is None and d is None:
             continue

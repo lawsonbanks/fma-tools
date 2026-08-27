@@ -173,6 +173,11 @@ class _Parser:
 
     def _ref_value(self, ref_text: str) -> float:
         m = _REF_RE.match(ref_text)
+        if int(m.group(2)) < 1:
+            # Excel rejects a row-0 reference outright; a silent 0.0 here would be
+            # the exact wrong-in-the-same-direction failure this module refuses
+            raise self._refuse(f"reference {ref_text.upper()} names row "
+                               f"{m.group(2)}, which does not exist")
         v = self.resolver.cell(m.group(1), m.group(2))
         if v is None:
             return 0.0          # a blank cell in arithmetic is 0 -- Excel semantics
@@ -210,6 +215,7 @@ class _Parser:
             else:
                 m = _REF_RE.match(t.text)
                 v = self.resolver.cell(m.group(1), m.group(2))
+                self._refuse_summed_date(v, t.text)
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     total += float(v)
             t = self._peek()
@@ -234,21 +240,44 @@ class _Parser:
         for r in range(min(r0, r1) - 1, max(r0, r1)):
             for c in range(min(c0, c1), max(c0, c1) + 1):
                 v = self.resolver.value_at(r, c)
+                self._refuse_summed_date(v, coord(r, c))
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     total += float(v)
         return total
+
+    def _refuse_summed_date(self, v, where: str) -> None:
+        # Excel's SUM counts a date as its serial number (~46,000 for 2026), so a
+        # date landing in a summed amount column silently moves the total by tens of
+        # thousands. Refuse rather than diverge from what the open spreadsheet shows.
+        if isinstance(v, (date, datetime, time)):
+            raise self._refuse(
+                f"SUM covers {where.upper()}, which holds the date {v} -- Excel "
+                "would add its serial number and the totals would silently disagree")
 
 
 class SheetResolver:
     """The raw grid plus a resolver, so a formula can reach any cell including another
     formula. Depth is tracked rather than assumed acyclic: a circular reference in a
-    client file must surface as a refusal, not a recursion crash."""
+    client file must surface as a refusal, not a recursion crash.
 
-    def __init__(self, grid: list[list], sheet_name: str = ""):
+    `formula_mask` is the set of (row, col) that really ARE formulas (openpyxl
+    data_type 'f'). Without it a text cell whose literal content starts with "=" is
+    evaluated as arithmetic -- fabricating a number Excel displays as text."""
+
+    def __init__(self, grid: list[list], sheet_name: str = "",
+                 formula_mask: set | None = None):
         self.grid = grid
         self.sheet_name = sheet_name
+        self.formula_mask = formula_mask
         self._cache: dict[tuple[int, int], object] = {}
         self._depth = 0
+
+    def is_formula_at(self, r: int, c: int) -> bool:
+        if self.formula_mask is not None:
+            return (r, c) in self.formula_mask
+        raw = self.grid[r][c] if (0 <= r < len(self.grid)
+                                  and 0 <= c < len(self.grid[r])) else None
+        return isinstance(raw, str) and raw.startswith("=")
 
     def cell(self, letters: str, rownum: str | int):
         r, c = int(rownum) - 1, col_index(letters)
@@ -265,16 +294,24 @@ class SheetResolver:
         if key in self._cache:
             return self._cache[key]
         raw = self.grid[r][c]
-        if isinstance(raw, str) and raw.startswith("="):
+        if self.is_formula_at(r, c):
             origin = (f"{self.sheet_name}!{coord(r, c)}" if self.sheet_name
                       else coord(r, c))
+            if not isinstance(raw, str):
+                # openpyxl hands array formulas (and data-table formulas) back as
+                # objects, not strings. Outside the grammar -- refuse, never a
+                # stringified repr in the grid.
+                raise FormulaProblem(
+                    f"{origin}: holds a {type(raw).__name__} (an array or data-table "
+                    "formula), which this grammar does not evaluate; refusing to "
+                    "treat it as nil")
             if self._depth > _MAX_DEPTH:
                 raise FormulaProblem(
                     f"{origin}: formula nesting past {_MAX_DEPTH} levels: {raw!r} "
                     "-- refusing rather than unwinding a possible cycle")
             self._depth += 1
             try:
-                out = _Parser(raw[1:], self, origin).parse()
+                out = _Parser(raw.removeprefix("="), self, origin).parse()
             finally:
                 self._depth -= 1
         elif isinstance(raw, bool):

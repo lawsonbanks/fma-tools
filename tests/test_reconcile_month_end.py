@@ -187,7 +187,9 @@ def _display_copy(c: dict) -> dict:
     fl = d["flows"]
     for k in list(fl):
         fl[k] = R(fl[k])
-    d["xero_controls"]["current_year_earnings"] = d["pnl"]["ytd_actual"]["npat"]
+    # the CYE control prints as round(true) -- it is a quoted control, not a figure
+    # derived from the rounded leaves
+    d["xero_controls"]["current_year_earnings"] = R(c["xero_controls"]["current_year_earnings"])
 
     for side in ("prior_month", "current"):
         s = d["balance_sheet"][side]
@@ -333,3 +335,107 @@ def test_display_plug_deltas_reported(run_month_end):
     plugs = [ch for ch in env["data"]["checks"] if ch["id"].startswith("display.plug.")]
     assert plugs and all(p["passed"] for p in plugs)
     assert any("delta" in (p.get("detail") or "") for p in plugs)
+
+
+# ── the review-found display holes, each proven closed ───────────────────────
+
+def test_display_cannot_drop_a_disclosed_finding(run_month_end):
+    """A client-records gap the pack must print cannot be absorbed into d90_plus
+    on the printed face by deleting the disclosure from the display copy."""
+    c = make_contract(ar_gap=-1000.0)
+    d = _display_copy(c)
+    d["disclosed_differences"] = []
+    b = d["aged_receivables"]["buckets"]
+    control = d["balance_sheet"]["current"]["assets"]["trade_receivables"]
+    b["total"] = control
+    b["d90_plus"] = (b["total"] - b["current"] - b["d1_30"] - b["d31_60"]
+                     - b["d61_90"])
+    d["aged_receivables"]["overdue_total"] = (b["d1_30"] + b["d31_60"] + b["d61_90"]
+                                              + b["d90_plus"])
+    code, env = run_month_end(c, display=d)
+    assert code == 1
+    assert any(b_["id"] == "display.disclosure.aged_ar_control"
+               for b_ in env["data"]["breaks"])
+
+
+def test_display_cannot_fabricate_a_disclosure(run_month_end):
+    c = make_contract()
+    d = _display_copy(c)
+    d["disclosed_differences"] = [{"check": "aged_ar_control", "amount": 500.0,
+                                   "note": "invented for the face"}]
+    b = d["aged_receivables"]["buckets"]
+    b["total"] += 500.0
+    b["d90_plus"] += 500.0
+    d["aged_receivables"]["overdue_total"] += 500.0
+    code, env = run_month_end(c, display=d)
+    assert code == 1
+    assert any(b_["id"] == "display.disclosure.aged_ar_control"
+               for b_ in env["data"]["breaks"])
+
+
+def test_display_cannot_overstate_ppe_and_equity(run_month_end):
+    """+$50k on ppe_net and retained earnings on BOTH columns used to pass every
+    display check; the prior-side leaves now pin it."""
+    c = _uneven_contract()
+    d = _display_copy(c)
+    for side in ("current", "prior_month"):
+        s = d["balance_sheet"][side]
+        s["assets"]["ppe_net"] += 50000.0
+        s["assets"]["total_non_current_assets"] += 50000.0
+        s["assets"]["total_assets"] += 50000.0
+        s["equity"]["retained_earnings"] += 50000.0
+        s["equity"]["total_equity"] += 50000.0
+    code, env = run_month_end(c, display=d)
+    assert code == 1
+    assert any("ppe_net" in b_["id"] for b_ in env["data"]["breaks"])
+
+
+def test_display_cannot_shift_ytd_npat_through_opex(run_month_end):
+    """-$50k off a YTD opex line with the chain re-derived and the display CYE moved
+    to match used to pass; opex leaves + the CYE leaf now pin it."""
+    c = _uneven_contract()
+    d = _display_copy(c)
+    p = d["pnl"]["ytd_actual"]
+    p["opex"]["salaries_oncosts"] -= 50000.0
+    p["opex_total"] -= 50000.0
+    p["ebitda"] += 50000.0
+    p["ebit"] += 50000.0
+    p["profit_before_tax"] += 50000.0
+    p["npat"] += 50000.0
+    d["xero_controls"]["current_year_earnings"] = p["npat"]
+    code, env = run_month_end(c, display=d)
+    assert code == 1
+    broken = {b_["id"] for b_ in env["data"]["breaks"]}
+    assert ("display.leaf.pnl.ytd_actual.opex.salaries_oncosts" in broken
+            or "display.leaf.xero_controls.current_year_earnings" in broken)
+
+
+# ── review-found input holes ─────────────────────────────────────────────────
+
+def test_nan_in_a_contract_refuses(run_cli, tmp_path):
+    c = make_contract()
+    text = __import__("json").dumps(c).replace(
+        str(c["pnl"]["month_actual"]["revenue"]), "NaN", 1)
+    p = tmp_path / "nan_contract.json"
+    p.write_text(text)
+    code, env = run_cli(["reconcile", "month_end", "--contract", str(p)])
+    assert code == 2
+    assert "NaN" in env["problems"][0]["message"]
+
+
+def test_modelled_without_rate_refuses(run_month_end):
+    c = make_contract()
+    c["tax_basis"] = "modelled"
+    c["flows"].pop("assumed_tax_rate", None)
+    code, env = run_month_end(c)
+    assert code == 2
+    assert "assumed_tax_rate" in env["problems"][0]["message"]
+
+
+def test_phantom_bucket_key_is_schema_refusal(run_month_end):
+    c = make_contract()
+    c["aged_receivables"]["buckets"]["parked"] = 100.0
+    c["aged_receivables"]["buckets"]["total"] += 100.0
+    code, env = run_month_end(c)
+    assert code == 2
+    assert env["problems"][0]["code"] == "CONTRACT_INVALID"

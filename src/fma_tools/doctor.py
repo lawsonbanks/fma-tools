@@ -52,6 +52,18 @@ def _check_self() -> str:
     return f"fma-tools at {exe or sys.executable} (module {Path(__file__).parent})"
 
 
+def _check_subcommands() -> str:
+    """The CLI this doctor lives in really carries all four tools."""
+    from .cli import _build_parser
+    p = _build_parser()
+    sub = next(a for a in p._actions if hasattr(a, "choices") and a.choices)
+    want = {"read-ledger", "reconcile", "render", "doctor"}
+    missing = want - set(sub.choices)
+    if missing:
+        raise RuntimeError(f"subcommands missing from this install: {sorted(missing)}")
+    return "read-ledger, reconcile, render, doctor"
+
+
 def _check_python() -> str:
     if sys.version_info < (3, 12):
         raise RuntimeError(f"Python {sys.version.split()[0]} < 3.12")
@@ -146,6 +158,7 @@ def run(args) -> tuple[dict, list[str]]:
             checks.append({"check": name, "status": "FAIL", "detail": str(e), "fix": fix})
 
     do("fma install", _check_self, _REINSTALL)
+    do("all four subcommands wired", _check_subcommands, _REINSTALL)
     do("python >= 3.12", _check_python, _REINSTALL)
     for mod, pip_name, why in _IMPORTS:
         do(f"{pip_name} ({why})", lambda m=mod, n=pip_name: _check_import(m, n), _REINSTALL)
@@ -156,7 +169,9 @@ def run(args) -> tuple[dict, list[str]]:
         do(f"directory {args.dir}", lambda: _check_dir(args.dir),
            "open the folder in Finder so OneDrive hydrates it, or pick a real path")
     if args.deep:
-        do("deep: smoke render + read-back", _check_deep, _REINSTALL)
+        do("deep: smoke render + read-back", _check_deep,
+           f"{sys.executable} -m playwright install chromium  # then retry; "
+           f"if it still fails: {_REINSTALL}")
 
     failed = [c for c in checks if c["status"] == "FAIL"]
     data = {"checks": checks, "problems_found": len(failed)}

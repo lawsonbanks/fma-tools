@@ -14,9 +14,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..errors import Refusal
+from ..errors import InputProblem, Refusal
 from . import loader, metadata
-from .formula import FormulaProblem, SheetResolver, coord, is_formula, to_json_value
+from .formula import FormulaProblem, SheetResolver, coord, to_json_value
 
 
 def add_arguments(p) -> None:
@@ -31,7 +31,8 @@ def add_arguments(p) -> None:
 
 
 def _resolve_sheet(sg: loader.SheetGrid) -> dict:
-    resolver = SheetResolver(sg.grid, sheet_name=sg.name)
+    resolver = SheetResolver(sg.grid, sheet_name=sg.name,
+                             formula_mask=sg.formula_mask)
     rows, formula_cells = [], []
     for r in range(len(sg.grid)):
         vals = []
@@ -41,9 +42,9 @@ def _resolve_sheet(sg: loader.SheetGrid) -> dict:
                 v = resolver.value_at(r, c)
             except FormulaProblem as e:
                 raise Refusal("FORMULA_UNEVALUATED", str(e))
-            if is_formula(raw):
+            if resolver.is_formula_at(r, c):
                 formula_cells.append({"ref": f"{sg.name}!{coord(r, c)}",
-                                      "formula": raw, "value": to_json_value(v)})
+                                      "formula": str(raw), "value": to_json_value(v)})
             vals.append(to_json_value(v))
         rows.append(vals)
     return {"name": sg.name, "n_rows": len(rows),
@@ -70,20 +71,28 @@ def run(args) -> tuple[dict, list[str]]:
             warnings.append(f"sheet {s['name']!r} has {s['merged_cells']} merged "
                             "cell ranges; values sit in the top-left cell of each")
 
-    header_dates = [d for d in (meta.get("report_date"),
-                                (meta.get("report_period") or {}).get("end")) if d]
+    # The date gate covers EVERY sheet: a wrong-dated second sheet is exactly the
+    # fault nothing downstream detects.
+    per_sheet_meta = [(sg.name, metadata.extract(sg.grid)) for sg in grids]
+    sheet_dates = []          # (sheet, date, raw line)
+    for name, m in per_sheet_meta:
+        for d in (m.get("report_date"), (m.get("report_period") or {}).get("end")):
+            if d:
+                sheet_dates.append((name, d, m.get("report_date_raw")))
+    header_dates = [d for _, d, _ in sheet_dates]
     if args.expect_date:
         if not header_dates:
             raise Refusal("DATE_MISMATCH",
                           f"--expect-date {args.expect_date} was given but no date "
-                          f"could be read from the export header of {path.name} "
+                          f"could be read from any sheet header of {path.name} "
                           f"(raw header line: {meta.get('report_date_raw')!r}). "
                           "Nothing downstream detects a wrong-dated export; re-pull "
                           "with the date field set explicitly.")
-        if args.expect_date not in header_dates:
+        wrong = [(n, d, raw) for n, d, raw in sheet_dates if d != args.expect_date]
+        if wrong:
+            n, d, raw = wrong[0]
             raise Refusal("DATE_MISMATCH",
-                          f"export header says {' / '.join(header_dates)} "
-                          f"(raw line: {meta.get('report_date_raw')!r}) but "
+                          f"sheet {n!r} header says {d} (raw line: {raw!r}) but "
                           f"{args.expect_date} was requested. Xero defaults the report "
                           "date field to the end of the current month -- re-export "
                           "with the date set explicitly.")
@@ -94,8 +103,15 @@ def run(args) -> tuple[dict, list[str]]:
     data = {"source_file": str(path), "metadata": meta}
     if args.out:
         out_path = Path(args.out).expanduser().resolve()
-        out_path.write_text(json.dumps({"source_file": str(path), "metadata": meta,
-                                        "sheets": sheets}, indent=1))
+        try:
+            out_path.write_text(json.dumps({"source_file": str(path),
+                                            "metadata": meta, "sheets": sheets},
+                                           indent=1))
+        except OSError as e:
+            raise InputProblem("CANNOT_OPEN",
+                               f"cannot write --out {out_path} ({e}) -- if the "
+                               "target folder lives in OneDrive it may be cloud-only; "
+                               "open it in Finder first")
         data["rows_file"] = str(out_path)
         data["sheets"] = [{k: s[k] for k in
                            ("name", "n_rows", "n_cols", "formula_count", "merged_cells")}
