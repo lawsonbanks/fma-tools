@@ -122,7 +122,9 @@ def test_date_cell_is_iso_string(build_xlsx, run_cli):
 
 # ── metadata + the date gate ─────────────────────────────────────────────────
 
-_HEADER = {"A1": "Fixture Pty Ltd", "A2": "Aged Receivables Detail",
+# Xero's real header order: report title first, entity second, date line third
+# (measured on live exports).
+_HEADER = {"A1": "Aged Receivables Detail", "A2": "Fixture Pty Ltd",
            "A3": "As at 30 June 2026",
            "A5": "Invoice Number", "B5": "Due Date", "C5": "Total",
            "A6": "INV-0001", "B6": datetime(2026, 5, 1), "C6": 11.0}
@@ -140,7 +142,7 @@ def test_header_metadata_extracted(build_xlsx, run_cli):
 
 
 def test_period_header_extracted(build_xlsx, run_cli):
-    path = build_xlsx({"A1": "Fixture Pty Ltd", "A2": "Profit and Loss",
+    path = build_xlsx({"A1": "Profit and Loss", "A2": "Fixture Pty Ltd",
                        "A3": "For the month ended 31 July 2026", "A5": "Account",
                        "B5": "Jul 2026", "A6": "Sales", "B6": 22.0})
     code, env = run_cli(["read-ledger", str(path)])

@@ -81,8 +81,10 @@ def extract(grid: list[list]) -> dict:
                                          "end": d1.isoformat()}
                 continue
         plain.append(text)
+    # Xero writes the report title first and the entity second (measured on live
+    # NSW balance-sheet and P&L exports, 2026-08-13 pull).
     if plain:
-        meta["entity"] = plain[0]
+        meta["report_title"] = plain[0]
     if len(plain) > 1:
-        meta["report_title"] = plain[1]
+        meta["entity"] = plain[1]
     return meta
