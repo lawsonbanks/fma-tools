@@ -14,6 +14,32 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _xero_cannot_reach_anything_real(tmp_path_factory, monkeypatch):
+    """Two guards, on for every test in the suite.
+
+    `fma xero` is the one tool with state and a network. A test that forgot to inject a
+    fake would otherwise spend a real refresh token -- which Xero replaces on use, so a
+    careless test run could end a live sign-in -- or call a client's ledger. So the
+    sign-in folder is a fresh temp folder, and the real transport refuses to exist."""
+    monkeypatch.setenv("FMA_CONFIG_DIR", str(tmp_path_factory.mktemp("fma-config")))
+    from fma_tools.xero import transport
+
+    def _no_network():
+        raise AssertionError("a test reached for the real Xero transport; inject a fake")
+    monkeypatch.setattr(transport, "_FACTORY", _no_network)
+
+
+@pytest.fixture
+def xero(monkeypatch):
+    """An in-memory Xero standing where the network would be."""
+    from fma_tools.xero import transport
+    from xero_fakes import FakeXero
+    fake = FakeXero()
+    monkeypatch.setattr(transport, "_FACTORY", lambda: fake)
+    return fake
+
+
 @pytest.fixture
 def build_xlsx(tmp_path):
     def _build(cells: dict, name: str = "fixture.xlsx", extra_sheets: dict | None = None) -> Path:

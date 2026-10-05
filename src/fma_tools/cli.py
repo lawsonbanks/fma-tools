@@ -1,4 +1,4 @@
-"""The fma entry point. One command, four subcommands, one output contract.
+"""The fma entry point. One command, five subcommands, one output contract.
 
 Every invocation prints a JSON envelope to stdout --
   {"tool", "version", "status": "ok"|"refuse"|"error", "data", "problems", "warnings"}
@@ -19,7 +19,8 @@ from .errors import EnvProblem, ToolError
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="fma",
                                 description="FMA delivery gates: read an export safely, "
-                                            "run the ties, render the artifact.")
+                                            "run the ties, render the artifact, pull the "
+                                            "books from Xero read-only.")
     p.add_argument("--version", action="version", version=f"fma-tools {__version__}")
     sub = p.add_subparsers(dest="tool", required=True)
 
@@ -46,6 +47,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("render", help="turn finished HTML into PDF, DOCX or PPTX")
     render_main.add_arguments(sp)
     sp.set_defaults(run=render_main.run, summary=render_main.summary)
+
+    from .xero import main as xero_main
+    sp = sub.add_parser("xero", help="pull every connected Xero organisation at a "
+                                     "typed date, read-only")
+    xero_main.add_arguments(sp)
+    sp.set_defaults(run=xero_main.run, summary=xero_main.summary)
 
     return p
 
@@ -93,7 +100,19 @@ def main(argv=None) -> int:
         exit_code = 4
         human = f"internal error: {type(e).__name__}: {e}"
 
-    print(json.dumps(envelope, indent=1))
+    try:
+        text = json.dumps(envelope, indent=1)
+    except (TypeError, ValueError) as e:
+        # A value the envelope cannot carry (a Decimal, a date) is a bug in the tool.
+        # Left to escape here it printed nothing and exited 1 -- which the contract
+        # reads as "the gate refused".
+        human = f"internal error: result was not serialisable ({type(e).__name__}: {e})"
+        envelope = {"tool": envelope["tool"], "version": __version__, "status": "error",
+                    "data": {}, "warnings": [],
+                    "problems": [{"code": "INTERNAL", "message": human}]}
+        exit_code = 4
+        text = json.dumps(envelope, indent=1)
+    print(text)
     print(f"[{envelope['tool']}] {human}", file=sys.stderr)
     for w in envelope["warnings"]:
         print(f"[{envelope['tool']}] warning: {w}", file=sys.stderr)

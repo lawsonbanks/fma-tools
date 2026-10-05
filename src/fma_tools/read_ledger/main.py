@@ -60,9 +60,16 @@ def run(args) -> tuple[dict, list[str]]:
 
     sheets = [_resolve_sheet(sg) for sg in grids]
     meta = metadata.extract(grids[0].grid)
+    # A pull written by `fma xero` holds the totals Xero's API returned as values, so
+    # it has no formulas and that is not a sign of tampering. Say who wrote it instead
+    # of warning: a warning that fires on every file is one nobody reads.
+    creator = grids[0].creator or ""
+    pulled = creator.startswith("fma xero")
+    if pulled:
+        meta["written_by"] = creator
 
     for s in sheets:
-        if s["formula_count"] == 0:
+        if s["formula_count"] == 0 and not pulled:
             warnings.append(
                 f"sheet {s['name']!r} carries no live formulas -- either the format "
                 "changed or the file was opened and saved in Excel; the values are "
