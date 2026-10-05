@@ -154,6 +154,9 @@ _XERO_WARN_DAYS = 45
 
 def _check_xero_private() -> str:
     from .xero import store
+    if store.is_shared():
+        return (f"{store.config_dir()} is a shared store by choice: its folder's sharing "
+                "keeps it, not file modes")
     loose = store.mode_problems()
     if loose:
         raise RuntimeError("; ".join(loose))

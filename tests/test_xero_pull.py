@@ -136,6 +136,28 @@ def test_reports_that_do_not_exist_are_exit_2(two, run_cli, tmp_path):
     assert not two.api_calls()
 
 
+def test_extra_heading_fields_reach_the_record(two, run_cli, tmp_path):
+    # A drive may require fields in every file's head that this tool cannot know.
+    out = tmp_path / "p"
+    code, env = _pull(run_cli, out, "--reports", "tb", "--front-matter", "world=0",
+                      "--front-matter", "entity=[acme]")
+    assert code == 0, env["problems"]
+    head = (out / "PULL.md").read_text().split("---")[1]
+    assert "\ntype: record\n" in head and "\nworld: 0\n" in head
+    assert "\nentity: [acme]\n" in head and "\nstatus: final\n" in head
+    assert json.loads((out / "PULL.json").read_text())["front_matter"] == \
+        {"world": "0", "entity": "[acme]"}
+
+
+@pytest.mark.parametrize("bad", ["world", "World=0", "type=source", "world=", "a=1\nb: 2",
+                                 "world=0|world=1", "=0"])
+def test_heading_fields_that_could_break_the_record_are_exit_2(two, run_cli, tmp_path, bad):
+    extra = [x for item in bad.split("|") for x in ("--front-matter", item)]
+    code, env = _pull(run_cli, tmp_path / "p", "--reports", "tb", *extra)
+    assert code == 2 and env["problems"][0]["code"] == "FRONT_MATTER_INVALID"
+    assert not two.api_calls() and not (tmp_path / "p").exists()
+
+
 def test_all_and_a_named_organisation_together_is_a_refusal(two, run_cli, tmp_path):
     code, env = run_cli(["xero", "pull", "--as-at", AS_AT, "--all", "--org", "A",
                          "--out", str(tmp_path / "p")])

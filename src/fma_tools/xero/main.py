@@ -49,6 +49,9 @@ def add_arguments(p) -> None:
     sp.add_argument("--client-id", help="the app's client id from developer.xero.com")
     sp.add_argument("--port", type=int, help=f"callback port (default {oauth.DEFAULT_PORT}); "
                                              "must match the app's redirect address")
+    sp.add_argument("--shared", action="store_true",
+                    help="say this store sits in a shared folder on purpose "
+                         "(FMA_CONFIG_DIR points into it); file modes are then not checked")
 
     sp = sub.add_parser("auth", help="connect ONE organisation: a person clicks Allow")
     sp.add_argument("--expect-org", help="refuse unless the organisation granted has "
@@ -105,12 +108,15 @@ def _config(args) -> tuple[dict, list[str]]:
         raise EnvProblem("XERO_NOT_CONFIGURED", "no Xero app is configured on this Mac",
                          fix=store.CONFIG_FIX)
     current.setdefault("port", oauth.DEFAULT_PORT)
-    if args.client_id or args.port:
+    if args.shared:
+        current["shared"] = True
+    if args.client_id or args.port or args.shared:
         store.save(store.APP, current)
     return ({"action": "config", "client_id": _mask(current["client_id"]),
              "port": current["port"],
              "redirect_address": oauth.redirect_uri(current["port"]),
              "folder": str(store.config_dir()),
+             "shared": bool(current.get("shared")),
              "note": "the redirect address must be registered with the app exactly as "
                      "shown"}, [])
 

@@ -45,7 +45,8 @@ discover nothing and write nowhere except the paths they are given.
 One stated exception: `fma xero` keeps its app's client id and its rotating sign-in in
 `~/.config/fma/xero/` (override with `FMA_CONFIG_DIR`), folder 700 and files 600. It is
 the only tool that uses the network, and `fma xero auth` is the only step in all of fma
-that needs a person at a browser.
+that needs a person at a browser. Where that store is put is the owner's decision: see
+[A sign-in kept in a shared folder](#a-sign-in-kept-in-a-shared-folder).
 
 This repo is public and never contains client data: no workbook is committed (test
 fixtures are built in-test) and a test refuses any client name in source or tests.
@@ -125,6 +126,38 @@ pull or `fma xero accounts` keeps it alive; once lapsed, `fma xero auth` and one
 renews every organisation that login holds; `fma xero disconnect --org <key>` withdraws
 one organisation from this side, and lets go of a connection Xero still holds for the
 app but this Mac does not when it is named in full.
+
+### A sign-in kept in a shared folder
+
+An agent that has a shared folder and nothing else (no installed tool, no home folder
+that lasts) can still pull, if the people who own the books decide the sign-in may live
+in that folder. That is their decision and not this tool's: anyone who can open the
+folder can then read the connected organisations until the app is disconnected in Xero.
+
+```sh
+export FMA_CONFIG_DIR="<absolute path of a folder inside the shared folder>"
+fma xero config --client-id <the app's client id> --shared
+fma xero auth --paste          # prints a link; a person clicks Allow in any browser
+fma xero auth --redirect '<the address that browser landed on>'
+```
+
+`--shared` records that the store is shared on purpose, so `fma doctor` does not fail
+it for file modes a synced drive cannot keep. A folder that refuses modes, locks or
+fsync is survived; one session at a time is then the rule. Keep one sign-in per place
+it is used: a Mac's own store and a shared store each get their own Allow, so neither
+spends the other's rotating token.
+
+The agent's install needs no heavy dependency and any Python from 3.10:
+
+```sh
+python3 -m pip install --no-deps https://github.com/lawsonbanks/fma-tools/archive/refs/heads/main.zip
+python3 -m pip install openpyxl certifi jsonschema
+python3 -m fma_tools.cli xero accounts
+```
+
+That install runs `xero` and `read-ledger`; `render` needs the full install above. A
+drive that requires its own fields at the head of every file can have them on the
+pull's record: `fma xero pull ... --front-matter world=0`.
 
 ## Develop
 
