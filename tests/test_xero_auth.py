@@ -591,3 +591,27 @@ def test_a_pasted_answer_that_can_never_work_ends_the_wait(configured, run_cli):
 def test_a_key_may_not_end_in_what_a_file_name_drops(configured, run_cli):
     code, env = run_cli(["xero", "auth", "--key", "NSW_"])
     assert code == 2 and env["problems"][0]["code"] == "KEY_INVALID"
+
+
+def test_one_login_taking_companies_over_never_costs_another_its_sign_in(configured, browser, run_cli, tmp_path):
+    for t, n in (("t-a", "Entity A Pty Ltd"), ("t-b", "Entity B Pty Ltd"),
+                 ("t-c", "Entity C Pty Ltd")):
+        configured.add_org(Org(t, n))
+    signed_in(configured, ["t-a", "t-b"], keys={"t-a": "A", "t-b": "B"})   # login 1: A and B
+    configured.will_grant("user-2", "other@example.test", ["t-c"])         # login 2 adds C
+    assert run_cli(["xero", "auth", "--key", "C", "--timeout", "10"])[0] == 0
+    assert sorted(store.load(store.TOKENS)["users"]) == ["user-1", "user-2"]
+    configured.will_grant("user-2", "other@example.test", ["t-b"])         # ...takes over B
+    assert run_cli(["xero", "auth", "--timeout", "10"])[0] == 0
+    assert sorted(store.load(store.TOKENS)["users"]) == ["user-1", "user-2"], \
+        "A still relies on login 1"
+    assert tenants.registry()["t-b"]["user_id"] == "user-2"
+    assert tenants.registry()["t-b"]["key"] == "B", "the key outlives a change of login"
+    configured.will_grant("user-2", "other@example.test", ["t-a"])         # ...and then A
+    assert run_cli(["xero", "auth", "--timeout", "10"])[0] == 0
+    assert sorted(store.load(store.TOKENS)["users"]) == ["user-2"]
+    code, env = run_cli(["xero", "accounts"])
+    assert code == 0 and [o["status"] for o in env["data"]["organisations"]] == ["live"] * 3
+    code, env = run_cli(["xero", "pull", "--as-at", "2026-06-30", "--all", "--reports", "tb",
+                         "--out", str(tmp_path / "p")])
+    assert code == 0, env["problems"]

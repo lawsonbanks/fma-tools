@@ -123,6 +123,9 @@ def test_the_group_sheet_passes_the_same_date_gate(pulled, run_cli, tmp_path):
     code, env = run_cli(["read-ledger", str(out), "--expect-date", AS_AT])
     assert code == 0, env["problems"]
     assert env["data"]["metadata"]["report_title"] == "Group trial balance"
+    # it is told apart from a pull: a derived sheet, never "Xero's own figures"
+    assert "written_by" not in env["data"]["metadata"]
+    assert len(env["warnings"]) == 1 and "not an export from Xero" in env["warnings"][0]
     code, env = run_cli(["read-ledger", str(out), "--expect-date", "2026-05-31"])
     assert code == 1
 

@@ -38,7 +38,10 @@ from ..errors import InputProblem, Refusal
 from ..read_ledger import loader, metadata
 from .reports import Report
 
-CREATOR = f"fma xero {__version__}"
+# What a workbook says wrote it. read-ledger tells a pull (Xero's own figures, proved
+# against the pull's record) from a group sheet (sums of a pull, made to be edited).
+PULL_CREATOR = f"fma xero pull {__version__}"
+GROUP_CREATOR = f"fma xero group {__version__}"
 _MONEY_FORMAT = "#,##0.00;-#,##0.00"
 
 
@@ -82,7 +85,7 @@ def _sheet_title(name: str) -> str:
 
 
 def write_workbook(path: Path, sheets: list[tuple[str, list[list]]],
-                   expect: dict | None = None) -> dict:
+                   expect: dict | None = None, creator: str = PULL_CREATOR) -> dict:
     """Write `sheets` ([(title, grid)]) to `path` atomically; return what was written.
 
     `expect` holds what the first sheet's header must read back as through
@@ -96,7 +99,7 @@ def write_workbook(path: Path, sheets: list[tuple[str, list[list]]],
         raise InputProblem("PATH_NOT_ABSOLUTE", f"{path} is not an absolute path")
     tmp = path.with_name(f".{path.stem}.tmp.xlsx")      # the loader opens .xlsx only
     wb = openpyxl.Workbook()
-    wb.properties.creator = CREATOR
+    wb.properties.creator = creator
     wb.remove(wb.active)
     used = set()
     for title, grid in sheets:

@@ -82,7 +82,8 @@ def run(args) -> tuple[dict, list[str]]:
     # A warning that fires on every file is one nobody reads, so an untouched pull is
     # recognised and not warned about -- but only on proof (see above).
     creator = grids[0].creator or ""
-    claims_pull = creator.startswith("fma xero")
+    claims_pull = creator.startswith("fma xero pull")
+    is_group = creator.startswith("fma xero group")
     pulled = claims_pull and _is_the_recorded_pull(path)
     if pulled:
         meta["written_by"] = creator
@@ -92,9 +93,14 @@ def run(args) -> tuple[dict, list[str]]:
             "pull record beside it lists byte for byte (no PULL.json here, or the "
             "workbook was edited, re-saved, renamed or moved). Its figures are no "
             "longer Xero's by proof: treat it as a hand-edited workbook")
+    elif is_group:
+        warnings.append(
+            f"{path.name} is a group sheet built by {creator}: sums of a pull, made for "
+            "a person to add eliminations to. It is a derived workbook that may have "
+            "been edited, not an export from Xero")
 
     for s in sheets:
-        if s["formula_count"] == 0 and not claims_pull:
+        if s["formula_count"] == 0 and not (claims_pull or is_group):
             warnings.append(
                 f"sheet {s['name']!r} carries no live formulas -- either the format "
                 "changed or the file was opened and saved in Excel; the values are "

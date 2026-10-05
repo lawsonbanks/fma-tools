@@ -335,7 +335,7 @@ def run(args) -> tuple[dict, list[str]]:
     info = layout.write_workbook(out, [("Group", group_grid),
                                        ("Chart differences", diff_grid),
                                        ("About", about_grid)],
-                                 {"date": as_at.isoformat()})
+                                 {"date": as_at.isoformat()}, layout.GROUP_CREATOR)
     data = {"out": str(out), "as_at": as_at.isoformat(), "sha256": info["sha256"],
             "organisations": [{"key": e["key"], "entity": e["label"]} for e in entities],
             "accounts": len(ordered), "differences": len(differences),
