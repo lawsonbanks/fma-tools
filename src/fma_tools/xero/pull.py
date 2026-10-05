@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -54,11 +55,35 @@ def add_arguments(p) -> None:
     p.add_argument("--reports", default=",".join(KINDS),
                    help=f"which to pull, comma-separated from {','.join(KINDS)} "
                         "(default: all)")
+    p.add_argument("--front-matter", action="append", metavar="KEY=VALUE",
+                   help="one more line for the head of PULL.md, for a drive whose files "
+                        "must carry fields this tool does not know (repeatable)")
 
 
 def _safe(text: str) -> str:
     out = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in text.strip())
     return out.strip("_")
+
+
+_OWN_FIELDS = ("type", "title", "status", "description", "tags")
+
+
+def _front_matter(items: list[str] | None) -> dict:
+    """KEY=VALUE pairs for the head of PULL.md. Plain single-line values only, and
+    never one of the fields the record writes for itself."""
+    out = {}
+    for item in items or []:
+        key, sep, value = item.partition("=")
+        key, value = key.strip(), value.strip()
+        if (not sep or not re.fullmatch(r"[a-z][a-z0-9_]*", key) or key in _OWN_FIELDS
+                or key in out or not value or len(value) > 120
+                or any(ch in value for ch in "\r\n")):
+            raise InputProblem("FRONT_MATTER_INVALID",
+                               f"--front-matter takes key=value on one line, a lower-case "
+                               f"key that is not one of {', '.join(_OWN_FIELDS)}, once "
+                               f"each; got {item!r}")
+        out[key] = value
+    return out
 
 
 def _kinds(text: str) -> list[str]:
@@ -125,6 +150,7 @@ def run(args) -> tuple[dict, list[str]]:
         raise Refusal("COMPARE_NOT_EARLIER",
                       f"--compare {compare} is not before --as-at {as_at}")
     kinds = _kinds(args.reports)
+    extra_head = _front_matter(getattr(args, "front_matter", None))
     out = _out_dir(args.out)
     prefix = _safe(args.prefix)
     orgs = tenants.resolve(args.org, args.all)
@@ -338,7 +364,7 @@ def run(args) -> tuple[dict, list[str]]:
             "compare": compare.isoformat() if compare else None,
             "basis": "accrual", "layout": "Xero's standard layout",
             "organisations": org_records, "not_available_by_api": NOT_BY_API,
-            "warnings": warnings}
+            "warnings": warnings, "front_matter": extra_head}
         blob = json.dumps(record_doc, indent=1).encode()
         layout.write_bytes(out / "PULL.json", blob)
         written.append(out / "PULL.json")
@@ -369,7 +395,9 @@ def run(args) -> tuple[dict, list[str]]:
 
 def _markdown(doc: dict) -> str:
     lines = ["---", "type: record",
-             f"title: Xero pull as at {doc['as_at']}", "status: final",
+             f"title: Xero pull as at {doc['as_at']}",
+             *[f"{k}: {v}" for k, v in (doc.get("front_matter") or {}).items()],
+             "status: final",
              f"description: What was pulled from Xero as at {doc['as_at']}, when, under "
              "whose authority, and what the pull does not contain.",
              "tags: [xero, pull]", "---", "",

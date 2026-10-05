@@ -429,3 +429,39 @@ def test_an_answer_about_connections_that_is_not_a_list_is_exit_2(one, run_cli):
     one.connections_status = 200                    # a 200 that carries {} and no list
     code, env = run_cli(["xero", "accounts"])
     assert code == 2 and env["problems"][0]["code"] == "XERO_NOT_JSON"
+
+
+# -- a store kept, on purpose, in a folder that is shared or synced --------------------
+
+def test_a_folder_that_takes_no_modes_locks_or_fsync_still_keeps_the_sign_in(one, monkeypatch):
+    # A mounted or synced folder may refuse all three. The sign-in must still be read,
+    # refreshed and saved there: a refusal to save would end it.
+    import fcntl
+
+    def refused(*args, **kwargs):
+        raise OSError(95, "Operation not supported")
+    signed_in(one, ["t-a"], expired=True)
+    old = _saved_refresh_token()
+    with monkeypatch.context() as m:
+        m.setattr(os, "chmod", refused)
+        m.setattr(os, "fsync", refused)
+        m.setattr(fcntl, "flock", refused)
+        XeroClient().get("user-1", "t-a", "Organisation")
+    assert _saved_refresh_token() != old and _saved_refresh_token() in one.refresh_tokens
+
+
+def test_a_store_shared_on_purpose_is_not_failed_for_its_modes(one, run_cli):
+    signed_in(one, ["t-a"], keys={"t-a": "A"})
+    d = store.config_dir()
+    os.chmod(d / store.TOKENS, 0o644)                 # as a synced drive leaves it
+    assert store.mode_problems() and not store.is_shared()
+    code, env = run_cli(["xero", "config"])
+    assert env["data"]["shared"] is False
+    code, env = run_cli(["xero", "config", "--shared"])
+    assert code == 0 and env["data"]["shared"] is True
+    assert store.is_shared() and store.mode_problems() == []
+    assert store.load(store.APP)["client_id"], "saying so keeps everything else"
+    code, env = run_cli(["doctor"])
+    check = {c["check"]: c for c in env["data"]["checks"]}["xero folder is private"]
+    assert check["status"] == "ok" and "shared store by choice" in check["detail"]
+    assert run_cli(["xero", "accounts"])[0] == 0

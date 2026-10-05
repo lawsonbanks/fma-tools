@@ -13,6 +13,13 @@ write that is lost or half-made is a dead sign-in. Every write here is whole-fil
 0600, to a temporary name in the same folder and then moved into place; refresh runs
 under a lock so two processes cannot each spend the same token.
 
+The store may also be placed, on purpose, in a folder that is shared or synced
+(`FMA_CONFIG_DIR` pointing into it, and `fma xero config --shared`), so that an agent
+which has that folder and nothing else can pull for itself. File modes and locks do not
+travel through a synced or mounted drive: there they are asked for and their refusal is
+survived, the folder's own sharing is what keeps the sign-in, and one session at a time
+is the rule.
+
 Nothing in this module prints or returns a token in an error message.
 """
 
@@ -50,8 +57,10 @@ def _ensure_dir() -> Path:
     d = config_dir()
     d.mkdir(parents=True, exist_ok=True)
     # mkdir's mode is masked by umask; set it outright so the folder is private even
-    # when it already existed with looser permissions.
-    os.chmod(d, 0o700)
+    # when it already existed with looser permissions. A mounted or synced folder may
+    # refuse a mode altogether; `mode_problems` is what reports a folder left loose.
+    with contextlib.suppress(OSError):
+        os.chmod(d, 0o700)
     return d
 
 
@@ -84,7 +93,8 @@ def save(name: str, data: dict) -> None:
         with os.fdopen(fd, "wb") as f:
             f.write(payload)
             f.flush()
-            os.fsync(f.fileno())
+            with contextlib.suppress(OSError):      # not every mount can fsync
+                os.fsync(f.fileno())
         os.replace(tmp, final)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
@@ -99,14 +109,21 @@ def delete(name: str) -> None:
 
 @contextlib.contextmanager
 def locked():
-    """Serialise anything that spends a refresh token."""
+    """Serialise anything that spends a refresh token. Where the folder cannot lock (a
+    mount, a synced drive), the work goes ahead unlocked rather than not at all."""
     d = _ensure_dir()
     fd = os.open(d / ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
+    held = False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            held = True
+        except OSError:
+            pass
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        if held:
+            fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
@@ -119,11 +136,21 @@ def app() -> dict:
     return a
 
 
+def is_shared() -> bool:
+    """Whether this store was put in a shared folder on purpose (`fma xero config
+    --shared`). File modes are then not what keeps it: the folder's own sharing is."""
+    try:
+        return bool(load(APP).get("shared"))
+    except InputProblem:
+        return False
+
+
 def mode_problems() -> list[str]:
-    """What is looser than 0700 / 0600. Empty when the folder is private."""
+    """What is looser than 0700 / 0600. Empty when the folder is private, and for a
+    store that is shared on purpose, where modes are not the boundary."""
     d = config_dir()
     out = []
-    if not d.exists():
+    if not d.exists() or is_shared():
         return out
     if stat.S_IMODE(d.stat().st_mode) != 0o700:
         out.append(f"{d} is mode {stat.S_IMODE(d.stat().st_mode):o}, want 700")
