@@ -4,8 +4,10 @@ Xero calls an organisation a tenant. One sign-in can cover several, and Xero lis
 them in no order that means anything. An earlier generation of this kind of tool kept
 "the first one" and pointed a client's report at a demo company. So here an
 organisation is always named: by the short key a person gave it (`NSW`), by its Xero
-name, or by its id. A name that matches two organisations is a refusal that lists
-both; a call that names none is a refusal too.
+name, or by its id -- in full. Part of a name is never enough: a key that is stale,
+mistyped or was set on another Mac must not land on whichever organisation happens to
+contain those letters. A name two organisations share is a refusal that lists both; a
+call that names none is a refusal too.
 """
 
 from __future__ import annotations
@@ -37,13 +39,20 @@ def key_of(row: dict) -> str:
     return row.get("key") or slug(row.get("name", ""))
 
 
+def file_key(row: dict) -> str:
+    """The key as it appears in a file name. Two organisations whose keys differ only
+    by what a file name drops would write over each other, so clashes are judged on
+    this, not on the key as typed."""
+    out = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in key_of(row).strip())
+    return out.strip("_") or "ORG"
+
+
 def _candidates(rows: dict, wanted: str) -> list[str]:
+    """Whole matches only: id, key or name."""
     w = wanted.strip().casefold()
-    exact = [tid for tid, r in rows.items()
-             if w in (tid.casefold(), key_of(r).casefold(), (r.get("name") or "").casefold())]
-    if exact:
-        return exact
-    return [tid for tid, r in rows.items() if w and w in (r.get("name") or "").casefold()]
+    return [tid for tid, r in rows.items()
+            if w and w in (tid.casefold(), key_of(r).casefold(),
+                           (r.get("name") or "").casefold())]
 
 
 def _listing(rows: dict, ids=None) -> str:
@@ -58,9 +67,13 @@ def find(wanted: str, rows: dict | None = None) -> str:
     if len(hits) == 1:
         return hits[0]
     if not hits:
+        w = wanted.strip().casefold()
+        near = [t for t, r in rows.items() if w and w in (r.get("name") or "").casefold()]
+        hint = f" Did you mean {_listing(rows, near)}? Name it in full or by its key." \
+            if near else ""
         raise Refusal("ORG_UNKNOWN",
-                      f"no connected organisation is called {wanted!r}. "
-                      f"Connected: {_listing(rows)}")
+                      f"no connected organisation has the key or the name {wanted!r}."
+                      f"{hint} Connected: {_listing(rows)}")
     raise Refusal("ORG_AMBIGUOUS",
                   f"{wanted!r} matches more than one organisation "
                   f"({_listing(rows, hits)}). Name it by its key.")
@@ -88,7 +101,7 @@ def resolve(orgs: list[str] | None, everything: bool) -> list[tuple[str, dict]]:
         raise Refusal("ORG_REQUIRED",
                       "say which organisation: --org <key> (repeatable) or --all. "
                       f"Connected: {_listing(rows)}")
-    keys = [key_of(rows[t]).casefold() for t in ids]
+    keys = [file_key(rows[t]).casefold() for t in ids]
     if len(set(keys)) != len(keys):
         raise Refusal("ORG_KEY_CLASH",
                       "two of these organisations share a key, so their files would "

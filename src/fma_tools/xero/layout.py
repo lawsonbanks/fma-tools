@@ -65,6 +65,18 @@ def table_grid(title: str, entity: str, note: str, header: list[str],
     return [[title], [entity], [note], [], list(header), *[list(r) for r in body]]
 
 
+def name_reads_as_itself(entity: str) -> bool:
+    """Whether read-ledger's header parser would take this organisation name for a
+    name. A name that is itself a date line ("Old File to 30 June 2023", "As at ...")
+    is read as the report's date instead, and every workbook for that organisation
+    would fail its read-back. Asked before a pull spends a single report call."""
+    probe = [["Report"], [entity], ["As at 1 January 2000"], [], ["Account", "x"]]
+    meta = metadata.extract(probe)
+    return (meta.get("entity") == str(entity).strip()
+            and meta.get("report_date") == "2000-01-01"
+            and not meta.get("report_period"))
+
+
 def _sheet_title(name: str) -> str:
     return (re.sub(r"[\[\]:*?/\\]", " ", name).strip() or "Report")[:31]
 
@@ -137,8 +149,9 @@ def _check_read_back(meta: dict, grid: list[list], expect: dict | None, name: st
     def refuse(why: str):
         raise Refusal("READ_BACK_MISMATCH",
                       f"{name} did not read back as written ({why}); nothing was kept")
-    title = grid[0][0] if grid and grid[0] else None
-    entity = grid[1][0] if len(grid) > 1 and grid[1] else None
+    # read-ledger strips the text of a header cell, so the comparison does too
+    title = str(grid[0][0]).strip() if grid and grid[0] else None
+    entity = str(grid[1][0]).strip() if len(grid) > 1 and grid[1] else None
     if meta.get("report_title") != title:
         refuse(f"title {meta.get('report_title')!r}, wrote {title!r}")
     if entity and meta.get("entity") != entity:

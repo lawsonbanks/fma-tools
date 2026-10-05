@@ -180,10 +180,15 @@ def _check_xero_app() -> str:
 def _check_xero_sign_in() -> str:
     import time
     from .xero import store, tenants
-    users = store.load(store.TOKENS).get("users") or {}
     rows = tenants.registry()
-    if not users or not rows:
+    needed = {r.get("user_id") for r in rows.values()}
+    # only the sign-ins an organisation here relies on; a leftover one is not a fault
+    users = {u: v for u, v in (store.load(store.TOKENS).get("users") or {}).items()
+             if u in needed}
+    if not rows:
         return "no organisation connected yet (run: fma xero auth)"
+    if len(users) < len(needed):
+        raise RuntimeError("an organisation is registered here with no saved sign-in")
     oldest = max((time.time() - float(u.get("refresh_issued_at", 0))) / 86400
                  for u in users.values())
     if oldest >= _XERO_LAPSE_DAYS:
@@ -197,9 +202,10 @@ def _check_xero_sign_in() -> str:
 
 def _check_xero_live() -> str:
     from .errors import ToolError
-    from .xero import store
+    from .xero import store, tenants
     from .xero.client import XeroClient
-    users = store.load(store.TOKENS).get("users") or {}
+    needed = {r.get("user_id") for r in tenants.registry().values()}
+    users = [u for u in (store.load(store.TOKENS).get("users") or {}) if u in needed]
     if not users:
         raise RuntimeError("no sign-in to ask Xero with")
     client, n = XeroClient(), 0

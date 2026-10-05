@@ -61,12 +61,54 @@ def test_naming_no_organisation_is_a_refusal_even_with_one_connected(xero, run_c
     assert "Entity A Pty Ltd" in env["problems"][0]["message"]
 
 
-def test_an_ambiguous_name_refuses_and_lists_both(two, run_cli, tmp_path):
+def test_part_of_a_name_is_never_enough(two, run_cli, tmp_path):
     code, env = run_cli(["xero", "pull", "--as-at", AS_AT, "--org", "Entity",
                          "--out", str(tmp_path / "p")])
+    assert code == 1 and env["problems"][0]["code"] == "ORG_UNKNOWN"
+    assert "Did you mean A (Entity A Pty Ltd), B (Entity B Pty Ltd)?" in \
+        env["problems"][0]["message"]
+    assert not two.api_calls()
+
+
+def test_a_key_that_matches_nothing_never_lands_on_the_one_company_connected(xero, run_cli, tmp_path):
+    # A stale or mistyped key ("A") sits inside the only connected name. It must not
+    # be taken for it: that pulled, and once disconnected, the wrong company's books.
+    xero.add_org(Org("t-b", "Bravo Trading Pty Ltd"))
+    signed_in(xero, ["t-b"], keys={"t-b": "BT"})
+    out = tmp_path / "p"
+    code, env = run_cli(["xero", "pull", "--as-at", AS_AT, "--org", "A", "--reports", "tb",
+                         "--out", str(out)])
+    assert code == 1 and env["problems"][0]["code"] == "ORG_UNKNOWN"
+    assert not out.exists() and not xero.api_calls()
+    code, env = run_cli(["xero", "disconnect", "--org", "a"])
+    assert code == 1 and env["problems"][0]["code"] == "ORG_UNKNOWN"
+    assert len(xero.users["user-1"]["connections"]) == 1, "still connected at Xero"
+    # the whole name, any case, and the key both still work
+    for name in ("bravo trading pty ltd", "bt"):
+        code, env = run_cli(["xero", "pull", "--as-at", AS_AT, "--org", name, "--reports",
+                             "tb", "--out", str(tmp_path / name.replace(" ", "_"))])
+        assert code == 0, env["problems"]
+
+
+def test_two_companies_with_one_name_must_be_told_apart_by_key(xero, run_cli, tmp_path):
+    xero.add_org(Org("t-1", "Demo Company (AU)"))
+    xero.add_org(Org("t-2", "Demo Company (AU)"))
+    signed_in(xero, ["t-1", "t-2"], keys={"t-1": "ONE", "t-2": "TWO"})
+    code, env = run_cli(["xero", "pull", "--as-at", AS_AT, "--org", "Demo Company (AU)",
+                         "--out", str(tmp_path / "p")])
     assert code == 1 and env["problems"][0]["code"] == "ORG_AMBIGUOUS"
-    assert "A (Entity A Pty Ltd)" in env["problems"][0]["message"]
-    assert "B (Entity B Pty Ltd)" in env["problems"][0]["message"]
+    assert "ONE (Demo Company (AU))" in env["problems"][0]["message"]
+
+
+def test_keys_that_make_the_same_file_name_refuse_before_anything_is_fetched(two, run_cli, tmp_path):
+    from fma_tools.xero import tenants
+    rows = tenants.registry()            # as an older version, or a hand, might leave it
+    rows["t-a"]["key"], rows["t-b"]["key"] = "NSW", "NSW_"
+    tenants.save_registry(rows)
+    out = tmp_path / "p"
+    code, env = _pull(run_cli, out)
+    assert code == 1 and env["problems"][0]["code"] == "ORG_KEY_CLASH"
+    assert not out.exists() and not two.api_calls()
 
 
 def test_a_relative_out_is_exit_2(two, run_cli):
@@ -255,12 +297,67 @@ def test_a_title_with_no_date_cannot_be_proved(two, run_cli, tmp_path):
     assert code == 1 and env["problems"][0]["code"] == "DATE_NOT_ECHOED"
 
 
-def test_an_end_only_title_is_accepted_and_said(two, run_cli, tmp_path):
+def test_a_title_naming_the_end_and_the_right_span_proves_the_period(two, run_cli, tmp_path):
     two.skew_title[("t-a", "bank")] = "For the month ended 30 June 2026"
+    code, env = _pull(run_cli, tmp_path / "p")
+    assert code == 0
+    assert not any("only the end of the period" in w for w in env["warnings"])
+
+
+def test_a_title_naming_only_an_end_is_accepted_and_said(two, run_cli, tmp_path):
+    two.skew_title[("t-a", "bank")] = "Period ending 30 June 2026"
+    code, env = _pull(run_cli, tmp_path / "p")
+    assert code == 0
+    assert any("A Bank Summary" in w and "only the end of the period" in w
+               for w in env["warnings"])
+
+
+def test_a_year_to_date_answered_with_a_month_is_refused(two, run_cli, tmp_path):
+    # the end matches; the span the words name does not
+    two.skew_title[("t-a", "pl")] = "For the month ended 30 June 2026"
     out = tmp_path / "p"
     code, env = _pull(run_cli, out)
+    assert code == 1 and env["problems"][0]["code"] == "DATE_MISMATCH"
+    assert "a period starting 2026-06-01" in env["problems"][0]["message"]
+    assert not out.exists()
+
+
+def test_a_company_whose_name_reads_as_a_date_is_refused_before_any_report(xero, run_cli, tmp_path):
+    xero.add_org(Org("t-a", "Entity A Pty Ltd"))
+    xero.add_org(Org("t-o", "Old File to 30 June 2023"))
+    signed_in(xero, ["t-a", "t-o"], keys={"t-a": "A", "t-o": "OLD"})
+    out = tmp_path / "p"
+    code, env = _pull(run_cli, out)
+    assert code == 1 and env["problems"][0]["code"] == "ORG_NAME_READS_AS_A_DATE"
+    assert "OLD" in env["problems"][0]["message"]
+    assert not out.exists()
+    assert all("Organisation" in u for _, u, _ in xero.api_calls()), \
+        "refused at the first look, before a report was asked for"
+    # the others can still be pulled by name
+    code, env = run_cli(["xero", "pull", "--as-at", AS_AT, "--org", "A", "--reports", "tb",
+                         "--out", str(out)])
     assert code == 0
-    assert any("only the end of the period" in w for w in env["warnings"])
+
+
+def test_a_name_with_a_stray_space_is_not_a_reason_to_refuse(xero, run_cli, tmp_path):
+    xero.add_org(Org("t-a", "Entity A Pty Ltd "))
+    signed_in(xero, ["t-a"], keys={"t-a": "A"})
+    code, env = run_cli(["xero", "pull", "--as-at", AS_AT, "--org", "A",
+                         "--out", str(tmp_path / "p")])
+    assert code == 0, env["problems"]
+
+
+def test_a_folder_that_cannot_be_written_is_exit_2_before_xero_is_asked(two, run_cli, tmp_path):
+    import os
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    os.chmod(locked, 0o500)
+    try:
+        code, env = _pull(run_cli, locked / "p")
+    finally:
+        os.chmod(locked, 0o700)
+    assert code == 2 and env["problems"][0]["code"] == "CANNOT_WRITE"
+    assert not two.api_calls()
 
 
 def test_a_total_that_does_not_foot_writes_nothing_and_names_every_break(two, run_cli, tmp_path):
@@ -382,6 +479,10 @@ def test_no_token_reaches_any_output(two, run_cli, tmp_path, capsys):
     ("2026-09-30", 12, 31, ("2026-01-01", "2026-12-31")),
     ("2024-02-29", 2, 29, ("2023-03-01", "2024-02-29")),
     ("2025-02-28", 2, 29, ("2024-03-01", "2025-02-28")),
+    # a February year end stored as the 28th still takes in the 29th of a leap year
+    ("2028-02-29", 2, 28, ("2027-03-01", "2028-02-29")),
+    ("2028-03-01", 2, 28, ("2028-03-01", "2029-02-28")),
+    ("2027-02-28", 2, 28, ("2026-03-01", "2027-02-28")),
     ("2026-03-15", 3, 31, ("2025-04-01", "2026-03-31")),
 ])
 def test_financial_year_bounds(as_at, month, day, want):

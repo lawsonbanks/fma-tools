@@ -45,19 +45,29 @@ def test_a_token_that_is_still_good_is_not_spent(one):
     assert not [u for _, u, _ in one.log if "connect/token" in u]
 
 
-def test_a_save_that_fails_leaves_the_old_sign_in_whole(one, monkeypatch):
+def test_a_renewal_that_cannot_be_saved_says_exactly_that(one, monkeypatch):
+    # Xero has already retired the token on disk by the time the save fails, so this is
+    # not "a bug, exit 4": the person has about half an hour and needs to be told.
     signed_in(one, ["t-a"], expired=True)
     path = store.config_dir() / store.TOKENS
     before = path.read_bytes()
+    tries = []
 
     def no_replace(src, dst):
+        tries.append(dst)
         raise OSError(28, "No space left on device")
     monkeypatch.setattr(os, "replace", no_replace)
-    with pytest.raises(OSError):
+    with pytest.raises(EnvProblem) as e:
         XeroClient().get("user-1", "t-a", "Organisation")
-    assert path.read_bytes() == before
+    assert e.value.code == "XERO_SIGN_IN_NOT_SAVED" and e.value.exit_code == 3
+    assert "renewed the sign-in but it could not be saved" in str(e.value)
+    assert "half an hour" in str(e.value) and e.value.fix
+    assert len(tries) == 2, "one retry, then say so"
+    assert path.read_bytes() == before, "the file is whole, though what it holds is spent"
     assert not list(store.config_dir().glob(".*.tmp")), "no half-written file is left"
     assert not one.api_calls(), "the unsaved token must not have been used"
+    for token in one.issued:
+        assert token not in str(e.value)
 
 
 def test_a_sign_in_xero_has_ended_is_exit_3_with_the_fix(one):
@@ -234,6 +244,20 @@ def test_the_real_transport_names_itself_and_verifies_with_certifi(monkeypatch):
     assert seen["agent"].startswith("fma-tools/") and seen["tenant"] == "t-a"
     assert seen["verifies"]
     assert r.status == 200 and r.headers == {"x-daylimit-remaining": "999"}
+
+
+def test_a_response_cut_off_mid_body_is_a_failed_connection_not_a_bug(monkeypatch):
+    import http.client
+    import urllib.request
+    from fma_tools.xero import transport
+
+    for failure in (http.client.IncompleteRead(b"half"), http.client.BadStatusLine("")):
+        def broken(req, timeout=None, context=None, failure=failure):
+            raise failure
+        monkeypatch.setattr(urllib.request, "urlopen", broken)
+        with pytest.raises(transport.TransportError) as e:
+            transport.UrllibTransport().request("GET", "https://example.test/x", {})
+        assert str(e.value) == type(failure).__name__
 
 
 def test_a_transport_failure_carries_its_kind_and_nothing_else(monkeypatch):

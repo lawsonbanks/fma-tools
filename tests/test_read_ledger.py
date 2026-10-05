@@ -304,9 +304,7 @@ def test_out_writes_rows_to_file(build_xlsx, run_cli, tmp_path):
     assert doc["sheets"][0]["rows"][0][0] == 2.0
 
 
-def test_a_pull_written_by_fma_xero_is_recognised_not_warned_about(tmp_path, run_cli):
-    # No formulas is the mark of a file someone re-saved in Excel -- except when the
-    # tool that wrote it says so. The warning must stay meaningful on hand exports.
+def _pulled_style_workbook(tmp_path):
     from decimal import Decimal
     from fma_tools.xero import layout
     grid = [["Balance Sheet"], ["Entity A Pty Ltd"], ["As at 30 June 2026"], [],
@@ -314,11 +312,41 @@ def test_a_pull_written_by_fma_xero_is_recognised_not_warned_about(tmp_path, run
             ["Total Bank", Decimal("5000.10")]]
     path = tmp_path / "pulled.xlsx"
     info = layout.write_workbook(path, [("Balance Sheet", grid)], {"date": "2026-06-30"})
+    return path, info
+
+
+def test_a_pull_is_recognised_only_on_proof_from_its_own_record(tmp_path, run_cli):
+    # No formulas is the mark of a file someone re-saved in Excel. A pull has none by
+    # design -- but what a workbook says about itself is not proof, so it is believed
+    # only when the pull record beside it lists these exact bytes.
+    import json
+    path, info = _pulled_style_workbook(tmp_path)
     assert info["report_date"] == "2026-06-30" and not list(tmp_path.glob(".*"))
+    code, env = run_cli(["read-ledger", str(path), "--expect-date", "2026-06-30"])
+    assert code == 0 and cell(env, "B8", "Balance Sheet") == 5000.10
+    assert "written_by" not in env["data"]["metadata"]
+    assert len(env["warnings"]) == 1 and "no longer Xero's by proof" in env["warnings"][0]
+
+    (tmp_path / "PULL.json").write_text(json.dumps(
+        {"organisations": [{"files": [{"file": path.name, "sha256": info["sha256"]}]}]}))
     code, env = run_cli(["read-ledger", str(path), "--expect-date", "2026-06-30"])
     assert code == 0 and env["warnings"] == []
     assert env["data"]["metadata"]["written_by"].startswith("fma xero")
-    assert cell(env, "B8", "Balance Sheet") == 5000.10
+
+
+def test_a_pulled_workbook_edited_and_saved_again_is_warned_about(tmp_path, run_cli):
+    import json
+    path, info = _pulled_style_workbook(tmp_path)
+    (tmp_path / "PULL.json").write_text(json.dumps(
+        {"organisations": [{"files": [{"file": path.name, "sha256": info["sha256"]}]}]}))
+    wb = openpyxl.load_workbook(path)                 # its `creator` survives the save
+    wb.active["B9"] = 999999
+    wb.save(path)
+    assert openpyxl.load_workbook(path).properties.creator.startswith("fma xero")
+    code, env = run_cli(["read-ledger", str(path), "--expect-date", "2026-06-30"])
+    assert code == 0 and cell(env, "B9", "Balance Sheet") == 999999
+    assert "written_by" not in env["data"]["metadata"]
+    assert any("hand-edited workbook" in w for w in env["warnings"])
 
 
 def test_a_bare_workbook_is_still_warned_about(build_xlsx, run_cli):

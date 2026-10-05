@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -87,6 +88,10 @@ def _out_dir(text: str | None) -> Path:
         raise InputProblem("OUT_PARENT_MISSING",
                            f"{out.parent} does not exist -- if it lives in OneDrive it "
                            "may be cloud-only; open it in Finder first")
+    probe = out if out.exists() else out.parent
+    if not os.access(probe, os.W_OK | os.X_OK):
+        raise InputProblem("CANNOT_WRITE",
+                           f"{probe} cannot be written to; nothing was asked of Xero")
     return out
 
 
@@ -136,6 +141,13 @@ def run(args) -> tuple[dict, list[str]]:
         user = row.get("user_id") or ""
         org_raw = reports.organisation(client, user, tid)
         org = reports.parse_organisation(org_raw)
+        if not layout.name_reads_as_itself(org["name"]):
+            raise Refusal(
+                "ORG_NAME_READS_AS_A_DATE",
+                f"{tenants.key_of(row)}: the organisation's Xero name, {org['name']!r}, "
+                "reads as a date line to read-ledger, so none of its workbooks could be "
+                "proved after writing. Nothing was written. Pull the others by --org, "
+                "and export this one by hand.")
         spend = client.spend[tid]
         needed = _calls_needed(kinds, bool(compare))
         if spend.day_remaining is not None and spend.day_remaining < needed:
@@ -149,7 +161,7 @@ def run(args) -> tuple[dict, list[str]]:
     # 3. fetch, prove, tie -- nothing is written yet
     staged, org_records, all_ties = [], [], []
     for tid, row, user, org, org_raw in plans:
-        key = _safe(tenants.key_of(row))
+        key = tenants.file_key(row)
         stem = f"{prefix}_{key}" if prefix else key
         fy_start, fy_end = reports.financial_year(as_at, org["fy_end_month"],
                                                   org["fy_end_day"])
@@ -292,8 +304,14 @@ def run(args) -> tuple[dict, list[str]]:
     raw_dir = out / "raw"
     written: list[Path] = []
     try:
-        out.mkdir(exist_ok=True)
-        raw_dir.mkdir(exist_ok=True)
+        try:
+            out.mkdir(exist_ok=True)
+            raw_dir.mkdir(exist_ok=True)
+        except OSError as e:
+            raise InputProblem("CANNOT_WRITE",
+                               f"cannot create {raw_dir} ({e.strerror or e}) -- if the "
+                               "folder lives in OneDrive it may be cloud-only; open it "
+                               "in Finder first")
         for (files, raws), record in zip(staged, org_records):
             raw_hashes = {}
             for raw_name, blob in raws:

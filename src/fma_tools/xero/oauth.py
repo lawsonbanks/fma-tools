@@ -36,6 +36,10 @@ TOKEN_URL = "https://identity.xero.com/connect/token"
 DEFAULT_PORT = 8976
 
 # offline_access is what yields a refresh token; openid + email say who authorised.
+# contacts, invoices, payments, budgets and the aged reports are not called by this
+# version. They are asked for now, read-only, because each consent needs a person who
+# holds the organisation's Xero login, once per organisation: asking again later for a
+# receivables pull would mean bringing that person back for every company.
 SCOPES = (
     "offline_access",
     "openid",

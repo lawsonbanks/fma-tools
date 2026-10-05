@@ -75,6 +75,9 @@ fma xero accounts            # what is connected; is each sign-in alive
 `--paste` prints the link instead of listening, for a consent given on another device;
 `fma xero auth --redirect '<the address the browser landed on>'` finishes it.
 
+An organisation is always named in full, by its key or its Xero name: part of a name
+never matches, and a name two organisations share is a refusal that lists both.
+
 **Every time.**
 
 ```sh
@@ -93,6 +96,8 @@ What a pull guarantees, or it writes nothing:
   Current Year Earnings on the balance sheet. All breaks are listed in one run.
 - **It reads back.** Each workbook is read through `read-ledger`'s own loader before it
   is kept, so `fma read-ledger <file> --expect-date <date>` passes on every dated file.
+  `read-ledger` recognises a pulled workbook only while it sits unchanged beside its
+  `PULL.json`: edited, re-saved or moved, it is warned about like any hand-edited file.
 - **It is whole.** A folder holds a complete pull with its record (`PULL.json`,
   `PULL.md`, and Xero's responses untouched under `raw/`) or it holds nothing.
 
@@ -102,16 +107,21 @@ ageing columns (they exist only in the on-screen report). Those stay hand export
 
 The group sheet is a management aggregation: each organisation's year-to-date trial
 balance by account code, their plain sum, and an empty Eliminations column. It is not
-a consolidation and not statutory accounts, and says so on its face. Differences
+a consolidation and not statutory accounts, and says so on its face. Two accounts share
+a line only when they carry the same code; an account with no code stands on a line of
+its own, and a name is never searched for something that looks like a code. Differences
 between the charts of accounts are listed on a second sheet, never guessed; an optional
 `--mapping` CSV (`entity, code, group_code[, group_name][, intercompany]`) says which
-codes belong together.
+codes belong together, and a line naming a code the chart does not have refuses. The
+pull must hold both the trial balance and the chart. An existing sheet is not written
+over without `--replace`: it may hold eliminations someone typed in.
 
 Limits worth knowing: the scopes requested are granular and read-only (nothing here
 can change a ledger); Xero's free developer tier holds five organisations per app and
 1,000 calls per organisation per day; an unused sign-in lapses after 60 days and any
-pull or `fma xero accounts` renews it; `fma xero disconnect --org <key>` withdraws one
-organisation from this side.
+pull or `fma xero accounts` keeps it alive; once lapsed, `fma xero auth` and one sign-in
+renews every organisation that login holds; `fma xero disconnect --org <key>` withdraws
+one organisation from this side.
 
 ## Develop
 

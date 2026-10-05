@@ -111,7 +111,22 @@ class XeroClient:
                 stamped["refresh_token"] = user["refresh_token"]
             user.update(stamped)
             tokens["users"][user_id] = user
-            store.save(store.TOKENS, tokens)         # before the new token is used
+            # Before the new token is used. Xero has already retired the old one, so a
+            # save that fails here is not an ordinary bug: say exactly what happened.
+            for attempt in (1, 2):
+                try:
+                    store.save(store.TOKENS, tokens)
+                    break
+                except OSError as e:
+                    if attempt == 2:
+                        raise EnvProblem(
+                            "XERO_SIGN_IN_NOT_SAVED",
+                            "Xero renewed the sign-in but it could not be saved here "
+                            f"({e.strerror or type(e).__name__}). Xero honours the saved "
+                            "one for about half an hour more: fix the folder "
+                            f"{store.config_dir()} and run the command again inside that "
+                            "time, or authorise again afterwards",
+                            fix=f"fma doctor --fix   # then, if it has lapsed: {store.AUTH_FIX}")
             return user["access_token"]
 
     # -- raw calls ---------------------------------------------------------------

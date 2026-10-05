@@ -97,7 +97,8 @@ def test_a_mapping_lines_codes_up_and_flags_intercompany(pulled, run_cli, tmp_pa
     out = tmp_path / "group.xlsx"
     code, env = _group(run_cli, pulled, out, "--mapping", str(mapping))
     assert code == 0, env["problems"]
-    assert env["data"]["mapped"] == 3
+    assert env["data"]["mapping_lines"] == 3
+    assert env["data"]["mapping_lines_with_a_balance"] == 3
     _, by_code = _table(openpyxl.load_workbook(out)["Group"])
     fees = by_code["404"]
     assert (fees["Entity A Pty Ltd"], fees["Entity B Pty Ltd"], fees["Entity C Pty Ltd"]) == \
@@ -189,14 +190,20 @@ def test_different_year_ends_are_said_on_the_face(xero, run_cli, tmp_path):
     assert "financial-year ends differ" in openpyxl.load_workbook(out)["Group"]["A2"].value
 
 
-def test_a_pull_without_trial_balances_cannot_be_grouped(xero, run_cli, tmp_path):
+@pytest.mark.parametrize("kinds, missing", [("bs,pl,coa", "trial balance"),
+                                            ("tb", "chart of accounts")])
+def test_a_group_sheet_needs_the_trial_balance_and_the_chart(xero, run_cli, tmp_path,
+                                                             kinds, missing):
+    # Without the chart, an account's code could only be guessed from its name.
     xero.add_org(Org("t-a", "Entity A Pty Ltd"))
     signed_in(xero, ["t-a"], keys={"t-a": "A"})
     pull = tmp_path / "pull"
-    assert run_cli(["xero", "pull", "--as-at", AS_AT, "--all", "--reports", "bs,pl",
+    assert run_cli(["xero", "pull", "--as-at", AS_AT, "--all", "--reports", kinds,
                     "--out", str(pull)])[0] == 0
     code, env = _group(run_cli, pull, tmp_path / "g.xlsx")
-    assert code == 1 and env["problems"][0]["code"] == "TRIAL_BALANCE_MISSING"
+    assert code == 1 and env["problems"][0]["code"] == "PULL_INCOMPLETE"
+    assert f"no {missing} for A" in env["problems"][0]["message"]
+    assert not (tmp_path / "g.xlsx").exists()
 
 
 def test_group_uses_no_network(pulled, run_cli, tmp_path, monkeypatch):
@@ -221,19 +228,83 @@ def test_one_company_is_still_a_sheet(xero, run_cli, tmp_path):
     assert about[5][0] == "A" and about[5][5] == "adviser@example.test"
 
 
-def test_without_the_chart_a_missing_account_is_not_claimed_to_be_missing(xero, run_cli, tmp_path):
-    three_orgs(xero)
-    signed_in(xero, ["t-a", "t-b", "t-c"], keys={"t-a": "A", "t-b": "B", "t-c": "C"})
+def test_accounts_with_no_code_are_never_lined_up_by_what_their_names_contain(xero, run_cli, tmp_path):
+    # Bank accounts in Xero often have no code. "(USD)" and "(800)" in a NAME are not
+    # codes: two such accounts are not one account, and neither is Accounts Payable.
+    xero.add_org(Org("t-a", "Entity A Pty Ltd", ledger=Ledger(
+        bank=[("", "Wise (USD)", 5000), ("", "Term Deposit (800)", 2000)])))
+    xero.add_org(Org("t-b", "Entity B Pty Ltd", ledger=Ledger(
+        bank=[("", "PayPal (USD)", 2000), ("", "Wise (USD)", 300)],
+        current_assets=[("610", "Accounts Receivable", 4000)],
+        current_liabilities=[("800", "Accounts Payable", 1000)],
+        income=[("200", "Sales", 9000)], expenses=[("400", "Advertising", 2000)])))
+    signed_in(xero, ["t-a", "t-b"], keys={"t-a": "A", "t-b": "B"})
     pull = tmp_path / "pull"
-    assert run_cli(["xero", "pull", "--as-at", AS_AT, "--all", "--reports", "tb",
-                    "--out", str(pull)])[0] == 0
+    assert run_cli(["xero", "pull", "--as-at", AS_AT, "--all", "--out", str(pull)])[0] == 0
     out = tmp_path / "g.xlsx"
     code, env = _group(run_cli, pull, out)
-    assert code == 0
-    assert any("judged from accounts with a balance" in w for w in env["warnings"])
-    rows = [[c.value for c in r] for r in openpyxl.load_workbook(out)["Chart differences"].iter_rows()]
-    assert rows[5][0] == "Read this first" and "may only be unused" in rows[5][3]
-    # class and code still come through, from the trial balance's own headings and labels
-    _, by_code = _table(openpyxl.load_workbook(out)["Group"])
-    assert by_code["090"]["Class"] == "ASSET" and by_code["200"]["Class"] == "REVENUE"
-    assert by_code["400"]["Class"] == "EXPENSE" and by_code["800"]["Class"] == "LIABILITY"
+    assert code == 0, env["problems"]
+    wb = openpyxl.load_workbook(out)
+    rows = [[c.value for c in r] for r in wb["Group"].iter_rows()]
+    header = rows[4]
+    a, b = header.index("Entity A Pty Ltd"), header.index("Entity B Pty Ltd")
+    lines = [r for r in rows[5:] if r[1] and r[1] != "Total (debits less credits)"]
+    by_name = {}
+    for r in lines:
+        by_name.setdefault(r[1], []).append(r)
+    # no row was given a code out of a name
+    assert not [r for r in lines if r[0] in ("USD", "800") and r[1] != "Accounts Payable"]
+    # each code-less account is its own line, in its own company's column only
+    assert [(r[0], r[a], r[b]) for r in by_name["Term Deposit (800)"]] == [(None, 2000, None)]
+    assert [(r[0], r[a], r[b]) for r in by_name["PayPal (USD)"]] == [(None, None, 2000)]
+    assert {(r[a], r[b]) for r in by_name["Wise (USD)"]} == {(5000, None), (None, 300)}, \
+        "same name, two companies, two lines"
+    assert len(by_name["Wise (USD)"]) == 2
+    payable = by_name["Accounts Payable"][0]
+    assert payable[0] == "800" and (payable[a], payable[b]) == (-3000, -1000)
+    assert payable[2] == "LIABILITY", "a bank asset was not netted into it"
+    # and a person is told
+    diffs = [[c.value for c in r] for r in wb["Chart differences"].iter_rows()][5:]
+    said = [d for d in diffs if d[0] == "No code: not lined up"]
+    assert sorted(d[2] for d in said) == ["PayPal (USD)", "Term Deposit (800)",
+                                          "Wise (USD)", "Wise (USD)"]
+    total = next(r for r in rows if r[1] == "Total (debits less credits)")
+    assert total[a] == 0 and total[b] == 0
+
+
+def test_a_sheet_that_exists_is_never_written_over_without_being_told(pulled, run_cli, tmp_path):
+    out = tmp_path / "g.xlsx"
+    assert _group(run_cli, pulled, out)[0] == 0
+    wb = openpyxl.load_workbook(out)                  # someone types an elimination in
+    ws = wb["Group"]
+    header = [c.value for c in ws[5]]
+    ws.cell(row=6, column=header.index("Eliminations") + 1, value=-123.45)
+    wb.save(out)
+    before = out.read_bytes()
+    code, env = _group(run_cli, pulled, out)
+    assert code == 1 and env["problems"][0]["code"] == "OUT_EXISTS"
+    assert out.read_bytes() == before
+    code, env = _group(run_cli, pulled, out, "--replace")
+    assert code == 0 and out.read_bytes() != before
+
+
+def test_a_mapping_line_that_matches_no_account_refuses(pulled, run_cli, tmp_path):
+    mapping = tmp_path / "mapping.csv"
+    mapping.write_text("entity,code,group_code\nC,41O,404\nA,404,404\n")   # letter O
+    out = tmp_path / "g.xlsx"
+    code, env = _group(run_cli, pulled, out, "--mapping", str(mapping))
+    assert code == 1 and env["problems"][0]["code"] == "MAPPING_UNMATCHED"
+    assert env["problems"][0]["message"] == "line 2: C has no account coded '41O'"
+    assert not out.exists()
+
+
+def test_a_mapping_that_excel_saved_badly_is_exit_2_not_a_bug(pulled, run_cli, tmp_path):
+    mapping = tmp_path / "mapping.csv"
+    mapping.write_bytes("entity,code,group_code,group_name\nA,404,404,Café fees\n"
+                        .encode("cp1252"))
+    code, env = _group(run_cli, pulled, tmp_path / "g.xlsx", "--mapping", str(mapping))
+    assert code == 2 and env["problems"][0]["code"] == "MAPPING_INVALID"
+    assert "CSV UTF-8" in env["problems"][0]["message"]
+    mapping.write_text("entity,code,group_code\nA,404,404,one,cell,too,many\n")
+    code, env = _group(run_cli, pulled, tmp_path / "g.xlsx", "--mapping", str(mapping))
+    assert code == 2 and "line 2 has more cells than the header" in env["problems"][0]["message"]

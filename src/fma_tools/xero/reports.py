@@ -84,7 +84,11 @@ def financial_year(as_at: date, end_month: int, end_day: int) -> tuple[date, dat
     organisation's own year end. Never assumed: a group can hold a 30 June company and
     a 31 December one."""
     def year_end(year: int) -> date:
-        return date(year, end_month, min(end_day, calendar.monthrange(year, end_month)[1]))
+        last = calendar.monthrange(year, end_month)[1]
+        # A February year end means the end of February: stored as the 28th, it still
+        # takes in the 29th of a leap year rather than pushing it into the next year.
+        day = last if end_month == 2 and end_day >= 28 else min(end_day, last)
+        return date(year, end_month, day)
     end = year_end(as_at.year)
     if as_at > end:
         end = year_end(as_at.year + 1)
@@ -221,9 +225,32 @@ def prove_as_at(report: Report, as_at: date, what: str) -> None:
                       f"{line!r}")
 
 
+_ENDED = re.compile(r"\b(month|quarter|year)\s+ended\b", re.IGNORECASE)
+
+
+def _implied_start(line: str, end: date) -> date | None:
+    """The first day of the period a title like "For the month ended ..." names."""
+    m = _ENDED.search(line or "")
+    if not m:
+        return None
+    span = m.group(1).lower()
+    if span == "month":
+        return end.replace(day=1)
+    months = 3 if span == "quarter" else 12
+    y, mth = end.year, end.month - months + 1
+    while mth < 1:
+        y, mth = y - 1, mth + 12
+    return date(y, mth, 1) if end == _month_end(end) else None
+
+
+def _month_end(d: date) -> date:
+    return d.replace(day=calendar.monthrange(d.year, d.month)[1])
+
+
 def prove_range(report: Report, start: date, end: date, what: str) -> bool:
-    """True when both ends were echoed; False when Xero named only the end ("For the
-    month ended ..."), which proves the end and leaves the start as asked."""
+    """True when both ends were echoed; False when Xero named only the end and no
+    span, which proves the end and leaves the start as asked. When the title names the
+    end and a span ("For the month ended ..."), the span must be the one asked for."""
     line, found = _echo(report)
     if not found:
         raise Refusal("DATE_NOT_ECHOED",
@@ -233,7 +260,13 @@ def prove_range(report: Report, start: date, end: date, what: str) -> bool:
     if found == [start, end]:
         return True
     if found == [end]:
-        return False
+        implied = _implied_start(line, end)
+        if implied is not None and implied != start:
+            raise Refusal("DATE_MISMATCH",
+                          f"{what}: asked for {start.isoformat()} to {end.isoformat()}, "
+                          f"Xero's title line says {line!r}, which is a period starting "
+                          f"{implied.isoformat()}")
+        return implied == start
     raise Refusal("DATE_MISMATCH",
                   f"{what}: asked for {start.isoformat()} to {end.isoformat()}, Xero's "
                   f"title line says {line!r}")

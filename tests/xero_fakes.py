@@ -79,8 +79,10 @@ class Org:
     def books(self, when: str) -> Ledger:
         return self.at.get(when, self.ledger)
 
-    def account_id(self, code: str) -> str:
-        return f"acct-{self.tenant_id}-{code}"
+    def account_id(self, code: str, name: str = "") -> str:
+        """Xero's id for an account; a code-less one (a bank account, often) is told
+        apart by its name."""
+        return f"acct-{self.tenant_id}-{code or 'nocode-' + name}"
 
 
 def _cell(value, account_id=None) -> dict:
@@ -129,6 +131,7 @@ class FakeXero:
     token_error: str = "invalid_grant"
     rate_limit: list = field(default_factory=list)     # headers for 429s, one per call
     api_status: tuple | None = None                    # force (status, body) on API calls
+    delete_status: int | None = None                   # force the answer to a DELETE
     no_scope_for: set = field(default_factory=set)     # path fragments answered 401
     skew_title: dict = field(default_factory=dict)     # (tenant, report) -> title line
     bend_total: dict = field(default_factory=dict)     # (tenant, report, label) -> delta
@@ -214,6 +217,8 @@ class FakeXero:
         user = self.users[user_id]
         parsed = urllib.parse.urlparse(url)
         if method == "DELETE":
+            if self.delete_status is not None:
+                return Response(self.delete_status, {}, b'{"Title":"Forbidden"}')
             conn_id = parsed.path.rsplit("/", 1)[-1]
             user["connections"] = [c for c in user["connections"] if c["id"] != conn_id]
             return Response(204, {}, b"")
@@ -270,7 +275,7 @@ class FakeXero:
                                     ("current_liabilities", "CURRLIAB", "LIABILITY"),
                                     ("income", "REVENUE", "REVENUE"),
                                     ("expenses", "EXPENSE", "EXPENSE")):
-                rows += [{"AccountID": org.account_id(c), "Code": c, "Name": n, "Type": typ,
+                rows += [{"AccountID": org.account_id(c, n), "Code": c, "Name": n, "Type": typ,
                           "Class": cls, "Status": "ACTIVE", "TaxType": "NONE"}
                          for c, n, _ in getattr(b, group)]
             rows.append({"AccountID": org.account_id("960"), "Code": "960",
@@ -298,7 +303,7 @@ class FakeXero:
             out = []
             for c, n, a in getattr(b, group):
                 dr, cr = (D(a), "") if debit else ("", D(a))
-                out.append(_row(f"{n} ({c})", [dr, cr, dr, cr], aid(c)))
+                out.append(_row(f"{n} ({c})" if c else n, [dr, cr, dr, cr], aid(c, n)))
             return out
         retained = b.retained
         eq = _row("Retained Earnings (960)", ["", retained, "", retained], aid("960"))
@@ -328,7 +333,7 @@ class FakeXero:
         aid = org.account_id
 
         def rows(group):
-            return [_row(n, [D(a)], aid(c)) for c, n, a in getattr(b, group)]
+            return [_row(n, [D(a)], aid(c, n)) for c, n, a in getattr(b, group)]
         assets = b.total("bank") + b.total("current_assets")
         cye = self._bent(org, "bs", "Current Year Earnings", b.net_profit)
         sections = [
@@ -370,11 +375,11 @@ class FakeXero:
         ti = sum((v for _, _, v in inc), Decimal(0))
         te = sum((v for _, _, v in exp), Decimal(0))
         sections = [
-            _section("Income", [_row(n, [v], aid(c)) for c, n, v in inc] + [
+            _section("Income", [_row(n, [v], aid(c, n)) for c, n, v in inc] + [
                 _row("Total Income", [self._bent(org, "pl", "Total Income", ti)],
                      kind="SummaryRow")]),
             _section("", [_row("Gross Profit", [ti])]),
-            _section("Less Operating Expenses", [_row(n, [v], aid(c)) for c, n, v in exp] + [
+            _section("Less Operating Expenses", [_row(n, [v], aid(c, n)) for c, n, v in exp] + [
                 _row("Total Operating Expenses", [te], kind="SummaryRow")]),
             _section("", [_row("Net Profit", [self._bent(org, "pl", "Net Profit", ti - te)])]),
         ]
@@ -386,7 +391,7 @@ class FakeXero:
         books = org.books(end)
         rows, closing = [], Decimal(0)
         for c, n, amt in books.bank:
-            rows.append(_row(n, [D(amt) - 1000, D(3000), D(2000), D(amt)], org.account_id(c)))
+            rows.append(_row(n, [D(amt) - 1000, D(3000), D(2000), D(amt)], org.account_id(c, n)))
             closing += D(amt)
         n = len(books.bank)
         rows.append(_row("Total", [closing - 1000 * n, D(3000 * n), D(2000 * n), closing],

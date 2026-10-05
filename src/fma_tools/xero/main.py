@@ -31,7 +31,9 @@ from . import oauth, pull as pull_mod, store, tenants
 from .client import NETWORK_FIX, XeroClient
 from .transport import default_transport
 
-_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,19}$")
+_KEY_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,18}[A-Za-z0-9])?$")
+_KEY_RULE = ("a key is 1 to 20 letters, digits, - or _, beginning and ending with a "
+             "letter or digit")
 _PENDING_MINUTES = 15
 
 
@@ -116,8 +118,9 @@ def _say(text: str) -> None:
 
 def _key_holder(key: str, rows: dict, own_tenant: str | None = None) -> dict | None:
     """The other organisation that already answers to `key`, if any."""
+    wanted = tenants.file_key({"key": key}).casefold()
     for tid, r in rows.items():
-        if tid != own_tenant and tenants.key_of(r).casefold() == key.casefold():
+        if tid != own_tenant and tenants.file_key(r).casefold() == wanted:
             return r
     return None
 
@@ -126,8 +129,7 @@ def _check_key(key: str | None, rows: dict, own_tenant: str | None = None) -> No
     if key is None:
         return
     if not _KEY_RE.match(key):
-        raise InputProblem("KEY_INVALID", "a key is 1 to 20 letters, digits, - or _, "
-                                          "starting with a letter or digit")
+        raise InputProblem("KEY_INVALID", _KEY_RULE)
     holder = _key_holder(key, rows, own_tenant)
     if holder is not None:
         raise Refusal("KEY_IN_USE", f"the key {key!r} already names {holder.get('name')!r}")
@@ -140,8 +142,7 @@ def _auth(args) -> tuple[dict, list[str]]:
         # Checked before anyone is asked to click: after Allow it is too late to refuse
         # without leaving an organisation connected at Xero and unknown here.
         if not _KEY_RE.match(args.key):
-            raise InputProblem("KEY_INVALID", "a key is 1 to 20 letters, digits, - or "
-                                              "_, starting with a letter or digit")
+            raise InputProblem("KEY_INVALID", _KEY_RULE)
         holder = _key_holder(args.key, tenants.registry())
         if holder is not None and (holder.get("name") or "").casefold() != \
                 (args.expect_org or "").casefold():
@@ -173,13 +174,20 @@ def _auth(args) -> tuple[dict, list[str]]:
                           "fma xero auth --paste")
         answer = oauth.parse_redirect(args.redirect)
         try:
-            return _complete(answer, pending["state"], pending["verifier"],
-                             int(pending.get("port") or port), app["client_id"],
-                             args.expect_org or pending.get("expect_org"),
-                             args.key or pending.get("key"),
-                             tuple(pending.get("scopes") or oauth.SCOPES))
-        finally:
+            result = _complete(answer, pending["state"], pending["verifier"],
+                               int(pending.get("port") or port), app["client_id"],
+                               args.expect_org or pending.get("expect_org"),
+                               args.key or pending.get("key"),
+                               tuple(pending.get("scopes") or oauth.SCOPES))
+        except EnvProblem:
+            # Xero was not reached, so the code is unspent: the same address can be
+            # given again while the code lasts.
+            raise
+        except ToolError:
             store.delete(store.PENDING)
+            raise
+        store.delete(store.PENDING)
+        return result
 
     verifier, challenge = oauth.new_pkce()
     state = secrets.token_urlsafe(24)
@@ -268,39 +276,67 @@ def _complete(answer: dict, state: str, verifier: str, port: int, client_id: str
                                  access_token=tok["access_token"])
     rows = tenants.registry()
     warnings: list[str] = []
-    if not granted and expect_org:
-        # Authorising an organisation again (the cure for a lapsed sign-in) may leave
-        # its original consent id in place; then it is found by the name asked for.
-        everything = client.connections(user_id, access_token=tok["access_token"])
-        granted = [c for c in everything
-                   if (c.get("tenantName") or "").casefold() == expect_org.casefold()
-                   and c.get("tenantId") in rows]
-        if granted:
-            warnings.append("Xero reported no newly granted organisation; the existing "
-                            f"connection to {expect_org!r} was renewed")
+    now = time.time()
+
     def undo(conns: list[dict]) -> str:
         """Remove connections this consent just made and this Mac is not keeping, so
-        nothing is left connected at Xero that nobody here knows about."""
+        nothing is left connected at Xero that nobody here knows about. Says what
+        Xero answered, not what was hoped."""
         fresh = [c for c in conns if c.get("id") and c.get("tenantId") not in rows]
         if not fresh:
             return ""
         try:
-            for c in fresh:
-                client._send("DELETE", f"https://api.xero.com/connections/{c['id']}",
-                             {"Authorization": f"Bearer {tok['access_token']}"})
-            return " What it connected has been disconnected again."
+            answers = [client._send("DELETE",
+                                    f"https://api.xero.com/connections/{c['id']}",
+                                    {"Authorization": f"Bearer {tok['access_token']}"})
+                       for c in fresh]
         except ToolError:
-            return (" It is still connected at Xero; remove it there under Settings, "
-                    "Connected apps.")
+            answers = []
+        if answers and all(a.status in (200, 204, 404) for a in answers):
+            return " What it connected has been disconnected again."
+        return (" It is still connected at Xero; remove it there under Settings, "
+                "Connected apps.")
 
+    def keep_sign_in() -> None:
+        """Save this login's new sign-in, and forget any login no organisation here
+        uses any more: a sign-in nobody needs would lapse and then fail every check."""
+        tokens = store.load(store.TOKENS)
+        users = tokens.setdefault("users", {})
+        users[user_id] = {**oauth.stamp(tok, now), "email": email}
+        needed = {r.get("user_id") for r in tenants.registry().values()} | {user_id}
+        for stale in [u for u in users if u not in needed]:
+            users.pop(stale)
+        store.save(store.TOKENS, tokens)
+
+    if not granted:
+        # No organisation was newly granted. If this login already holds organisations
+        # here, the person has signed in again -- the cure for a lapsed sign-in -- and
+        # the new sign-in serves every one of them.
+        known = {tid: r for tid, r in rows.items() if r.get("user_id") == user_id}
+        if known:
+            still = {str(c.get("tenantId")) for c in
+                     client.connections(user_id, access_token=tok["access_token"])}
+            with store.locked():
+                keep_sign_in()
+            gone = sorted(tenants.key_of(r) for tid, r in known.items() if tid not in still)
+            if gone:
+                warnings.append("no longer connected at Xero under this login: "
+                                + ", ".join(gone))
+            if expect_org and expect_org.casefold() not in {
+                    (r.get("name") or "").casefold() for tid, r in known.items()
+                    if tid in still}:
+                warnings.append(f"{expect_org!r} is not among the organisations this "
+                                "login holds here")
+            renewed = sorted(tenants.key_of(r) for tid, r in known.items() if tid in still)
+            return ({"action": "auth", "step": "renewed", "organisations": renewed,
+                     "authorised_by": email, "connected": len(rows),
+                     "cap": tenants.FREE_TIER_CAP}, warnings)
     if len(granted) != 1:
         names = ", ".join(repr(c.get("tenantName")) for c in granted) or "none"
         raise Refusal("CONSENT_NOT_ONE_ORG",
                       f"this consent granted {len(granted)} organisations ({names}), "
                       "not exactly one, so nothing was saved here. Run the command "
-                      "again and pick a single organisation"
-                      + ("." + undo(granted) if granted else
-                         "; to renew one already connected, name it with --expect-org"))
+                      "again and pick a single organisation." + undo(granted))
     conn = granted[0]
     tid, name = str(conn.get("tenantId") or ""), str(conn.get("tenantName") or "")
     if expect_org and name.casefold() != expect_org.casefold():
@@ -315,11 +351,7 @@ def _complete(answer: dict, state: str, verifier: str, port: int, client_id: str
                         f"fma xero accounts --set-key \"{name}\" <KEY>")
         key = None
 
-    now = time.time()
     with store.locked():
-        tokens = store.load(store.TOKENS)
-        tokens.setdefault("users", {})[user_id] = {**oauth.stamp(tok, now), "email": email}
-        store.save(store.TOKENS, tokens)
         rows = tenants.registry()
         previous = rows.get(tid) or {}
         rows[tid] = {
@@ -329,6 +361,7 @@ def _complete(answer: dict, state: str, verifier: str, port: int, client_id: str
             "connected_at": conn.get("createdDateUtc") or "",
             "saved_at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")}
         tenants.save_registry(rows)
+        keep_sign_in()
 
     granted_scopes = set((tok.get("scope") or "").split())
     missing = [s for s in asked if s not in granted_scopes] if granted_scopes else []
@@ -352,18 +385,24 @@ def _complete(answer: dict, state: str, verifier: str, port: int, client_id: str
 
 def _accounts(args) -> tuple[dict, list[str]]:
     store.app()
-    rows = tenants.registry()
     if args.set_key:
         wanted, key = args.set_key
-        tid = tenants.find(wanted, rows)
-        _check_key(key, rows, own_tenant=tid)
-        rows[tid]["key"] = key
-        tenants.save_registry(rows)
+        with store.locked():
+            rows = tenants.registry()
+            tid = tenants.find(wanted, rows)
+            _check_key(key, rows, own_tenant=tid)
+            rows[tid]["key"] = key
+            tenants.save_registry(rows)
         return ({"action": "accounts", "step": "key",
                  "organisation": {"key": key, "name": rows[tid].get("name")}}, [])
 
-    users = store.load(store.TOKENS).get("users") or {}
-    if not users or not rows:
+    rows = tenants.registry()
+    # Only the logins an organisation here still relies on: one nobody uses has no
+    # business failing this check.
+    needed = {r.get("user_id") for r in rows.values()}
+    users = {u: v for u, v in (store.load(store.TOKENS).get("users") or {}).items()
+             if u in needed}
+    if not rows:
         raise EnvProblem("XERO_NOT_SIGNED_IN",
                          "no organisation is connected on this Mac yet", fix=store.AUTH_FIX)
     client = XeroClient()
@@ -375,7 +414,8 @@ def _accounts(args) -> tuple[dict, list[str]]:
             live[uid] = {str(c.get("tenantId")): c for c in client.connections(uid)}
         except EnvProblem as e:
             problems += e.problems
-    users = store.load(store.TOKENS).get("users") or {}       # refresh may have rotated
+    users = {u: v for u, v in (store.load(store.TOKENS).get("users") or {}).items()
+             if u in needed}                                  # refresh may have rotated
     listed = []
     for tid, r in sorted(rows.items(), key=lambda kv: tenants.key_of(kv[1]).casefold()):
         uid = r.get("user_id") or ""
@@ -440,10 +480,12 @@ def _disconnect(args) -> tuple[dict, list[str]]:
         rows = tenants.registry()
         rows.pop(tid, None)
         tenants.save_registry(rows)
-        uid = row.get("user_id")
-        if uid and not any(r.get("user_id") == uid for r in rows.values()):
-            tokens = store.load(store.TOKENS)
-            (tokens.get("users") or {}).pop(uid, None)
+        tokens = store.load(store.TOKENS)
+        needed = {r.get("user_id") for r in rows.values()}
+        stale = [u for u in (tokens.get("users") or {}) if u not in needed]
+        for u in stale:
+            tokens["users"].pop(u)
+        if stale:
             store.save(store.TOKENS, tokens)
     return ({"action": "disconnect",
              "organisation": {"key": tenants.key_of(row), "name": row.get("name")},
@@ -497,6 +539,9 @@ def summary(data: dict) -> str:
     if action == "auth":
         if data.get("step") == "link":
             return "xero auth: link printed; finish with --redirect"
+        if data.get("step") == "renewed":
+            return ("xero auth: sign-in renewed for "
+                    f"{', '.join(data['organisations']) or 'no organisation'}")
         o = data["organisation"]
         return (f"xero auth: connected {o['key']} ({o['name']}); "
                 f"{data['connected']} of {data['cap']} in use")

@@ -8,6 +8,7 @@ raises, so no test can reach the network or a real sign-in by accident.
 
 from __future__ import annotations
 
+import http.client
 import ssl
 import urllib.error
 import urllib.request
@@ -49,9 +50,16 @@ class UrllibTransport:
                 return Response(r.status, {k.lower(): v for k, v in r.headers.items()},
                                 r.read())
         except urllib.error.HTTPError as e:
-            return Response(e.code, {k.lower(): v for k, v in e.headers.items()},
-                            e.read())
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            try:
+                body = e.read()
+            except (http.client.HTTPException, OSError):
+                body = b""
+            return Response(e.code, {k.lower(): v for k, v in e.headers.items()}, body)
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError,
+                OSError) as e:
+            # http.client's own failures (a response cut off mid-body, a status line
+            # that is not one) are not OSErrors; left to escape they would read as a
+            # bug in this tool rather than a connection that failed.
             raise TransportError(type(e).__name__) from None
 
 

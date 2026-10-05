@@ -125,15 +125,18 @@ def test_side_by_side_keeps_each_dates_own_figure():
     then = reports.parse(_balance_sheet(titles=["Balance Sheet", "Entity A Pty Ltd",
                                                 "As at 31 March 2019"]))
     then.header[1] = "31 Mar 2019"
+    for sec in then.sections:                       # the earlier date's own figures
+        for ln in sec.lines:
+            ln.values = [v + 1000 if isinstance(v, Decimal) else v for v in ln.values]
     then.sections[1].lines.insert(1, reports.Line("row", "Term Deposit", [Decimal("5.00")], "a-3"))
     both = reports.side_by_side(now, then)
     assert both.header == ["", "30 Apr 2019", "31 Mar 2019"]
     bank = next(s for s in both.sections if s.title == "Bank")
     assert [(ln.label, ln.values) for ln in bank.lines] == [
-        ("Savings", [Decimal("-1850.00"), Decimal("-1850.00")]),
-        ("Cheque", [Decimal("2146.37"), Decimal("2146.37")]),
+        ("Savings", [Decimal("-1850.00"), Decimal("-850.00")]),
+        ("Cheque", [Decimal("2146.37"), Decimal("3146.37")]),
         ("Term Deposit", [None, Decimal("5.00")]),
-        ("Total Bank", [Decimal("296.37"), Decimal("296.37")])]
+        ("Total Bank", [Decimal("296.37"), Decimal("1296.37")])]
     assert [s.title for s in both.sections] == [s.title for s in now.sections]
 
 
