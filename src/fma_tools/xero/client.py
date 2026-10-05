@@ -104,7 +104,12 @@ class XeroClient:
                 raise EnvProblem("XERO_UNREACHABLE",
                                  f"could not reach Xero to refresh the sign-in ({e})",
                                  fix=NETWORK_FIX)
-            user.update(oauth.stamp(fresh, self.clock()))
+            stamped = oauth.stamp(fresh, self.clock())
+            if not stamped["refresh_token"]:
+                # Xero always rotates; if an answer ever came without one, the token
+                # just spent is the only one there is. Never overwrite it with nothing.
+                stamped["refresh_token"] = user["refresh_token"]
+            user.update(stamped)
             tokens["users"][user_id] = user
             store.save(store.TOKENS, tokens)         # before the new token is used
             return user["access_token"]

@@ -128,6 +128,7 @@ class FakeXero:
     token_status: int | None = None                    # force the token endpoint's status
     token_error: str = "invalid_grant"
     rate_limit: list = field(default_factory=list)     # headers for 429s, one per call
+    api_status: tuple | None = None                    # force (status, body) on API calls
     no_scope_for: set = field(default_factory=set)     # path fragments answered 401
     skew_title: dict = field(default_factory=dict)     # (tenant, report) -> title line
     bend_total: dict = field(default_factory=dict)     # (tenant, report, label) -> delta
@@ -229,6 +230,8 @@ class FakeXero:
             self.before_api(path, tenant)
         if self.rate_limit:
             return Response(429, self.rate_limit.pop(0), b"{}")
+        if self.api_status:
+            return Response(self.api_status[0], {}, self.api_status[1])
         if any(frag in path for frag in self.no_scope_for):
             return Response(401, {"www-authenticate": 'Bearer error="insufficient_scope"'},
                             b"{}")

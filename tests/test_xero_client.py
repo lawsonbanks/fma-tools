@@ -247,3 +247,51 @@ def test_a_transport_failure_carries_its_kind_and_nothing_else(monkeypatch):
     with pytest.raises(transport.TransportError) as e:
         transport.UrllibTransport().request("GET", "https://example.test/x?code=SECRET-CODE", {})
     assert str(e.value) == "URLError"
+
+
+@pytest.mark.parametrize("status, body, kind, code", [
+    (503, b"upstream", EnvProblem, "XERO_UNREACHABLE"),
+    (500, b'{"Title":"An error occurred"}', EnvProblem, "XERO_UNREACHABLE"),
+    (400, b'{"Type":"ValidationException","Message":"The date range is too long"}',
+     None, "XERO_REJECTED"),
+])
+def test_xeros_other_answers_map_to_the_contract(one, status, body, kind, code):
+    from fma_tools.errors import InputProblem
+    signed_in(one, ["t-a"])
+    one.api_status = (status, body)
+    with pytest.raises(kind or InputProblem) as e:
+        XeroClient().get("user-1", "t-a", "Reports/ProfitAndLoss")
+    assert e.value.code == code
+    if status == 400:
+        assert "The date range is too long" in str(e.value), "Xero's own reason is passed on"
+
+
+def test_a_resource_xero_does_not_have_is_exit_2(one):
+    from fma_tools.errors import InputProblem
+    signed_in(one, ["t-a"])
+    with pytest.raises(InputProblem) as e:
+        XeroClient().get("user-1", "t-a", "Reports/NoSuchReport")
+    assert e.value.code == "XERO_NOT_FOUND" and e.value.exit_code == 2
+
+
+def test_an_answer_that_is_not_json_is_exit_2(one):
+    from fma_tools.errors import InputProblem
+    signed_in(one, ["t-a"])
+    one.api_status = (200, b"<Response><Id>xml, because Accept was ignored</Id></Response>")
+    with pytest.raises(InputProblem) as e:
+        XeroClient().get("user-1", "t-a", "Organisation")
+    assert e.value.code == "XERO_NOT_JSON"
+
+
+def test_a_refresh_answer_without_a_new_token_never_blanks_the_old_one(one, monkeypatch):
+    from fma_tools.xero import oauth
+    old = signed_in(one, ["t-a"], expired=True)["refresh_token"]
+    real = oauth.refresh
+
+    def without_rotation(transport, client_id, refresh_token):
+        answer = real(transport, client_id, refresh_token)
+        answer.pop("refresh_token")
+        return answer
+    monkeypatch.setattr(oauth, "refresh", without_rotation)
+    XeroClient().get("user-1", "t-a", "Organisation")
+    assert _saved_refresh_token() == old

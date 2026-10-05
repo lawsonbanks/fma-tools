@@ -135,3 +135,15 @@ def test_side_by_side_keeps_each_dates_own_figure():
         ("Term Deposit", [None, Decimal("5.00")]),
         ("Total Bank", [Decimal("296.37"), Decimal("296.37")])]
     assert [s.title for s in both.sections] == [s.title for s in now.sections]
+
+
+def test_a_footing_that_could_not_run_is_said_not_skipped():
+    rep = reports.parse(_balance_sheet())
+    bank = next(s for s in rep.sections if s.title == "Bank")
+    bank.lines[0].values[1] = "n/a"                         # text in the March column
+    ties = {t.name: t.status for t in reports.section_ties(rep, "bs")}
+    assert ties["bs: Total Bank (30 Apr 2019)"] == "ok"
+    assert ties["bs: Total Bank (31 Mar 2019)"] == "not_checked"
+    bank.lines.append(reports.Line("summary", "Total Bank (again)", [Decimal("1")] * 3))
+    again = [t for t in reports.section_ties(rep, "bs") if t.name == "bs: Bank"]
+    assert again and again[0].status == "not_checked" and "more than one total" in again[0].detail

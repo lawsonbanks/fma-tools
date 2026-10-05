@@ -273,17 +273,27 @@ def section_ties(report: Report, what: str) -> list[Tie]:
     for sec in report.sections:
         rows = [ln for ln in sec.lines if ln.kind == "row"]
         totals = [ln for ln in sec.lines if ln.kind == "summary"]
-        if not rows or len(totals) != 1:
+        if not rows or not totals:
+            continue                    # nothing to foot: lines with no total, or a lone total
+        if len(totals) > 1:
+            out.append(Tie(f"{what}: {sec.title or totals[0].label}", "not_checked",
+                           "the section carries more than one total, so which lines each "
+                           "one sums is not known"))
             continue
         total = totals[0]
         for j, tv in enumerate(total.values):
             col = [ln.values[j] for ln in rows if j < len(ln.values)]
-            if any(isinstance(v, str) for v in col) or not isinstance(tv, Decimal):
-                continue
             col_name = report.header[j + 1] if j + 1 < len(report.header) else f"column {j + 1}"
+            name = f"{what}: {total.label} ({col_name})"
+            if tv is None and all(v is None for v in col):
+                continue                # an empty column foots to an empty total
+            if any(isinstance(v, str) for v in col) or not isinstance(tv, Decimal):
+                # said, never skipped in silence: a tie that did not run is not a pass
+                out.append(Tie(name, "not_checked", "a cell in this column holds text or "
+                                                    "nothing where a number belongs"))
+                continue
             s = sum((v for v in col if isinstance(v, Decimal)), Decimal(0))
-            out.append(_compare(f"{what}: {total.label} ({col_name})", s, tv,
-                                "sum of lines", "Xero's total"))
+            out.append(_compare(name, s, tv, "sum of lines", "Xero's total"))
     return out
 
 
