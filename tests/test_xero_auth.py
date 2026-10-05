@@ -335,9 +335,15 @@ def test_set_key_renames_and_refuses_a_clash(xero, run_cli):
     assert code == 0 and tenants.registry()["t-b"]["key"] == "B"
     code, env = run_cli(["xero", "accounts", "--set-key", "Entity B Pty Ltd", "A"])
     assert code == 1 and env["problems"][0]["code"] == "KEY_IN_USE"
-    for bad in ("has space", "NSW_", "-NSW", ""):
+    for bad in ("has space", "NSW_", ""):
         code, env = run_cli(["xero", "accounts", "--set-key", "Entity B Pty Ltd", bad])
         assert code == 2 and env["problems"][0]["code"] == "KEY_INVALID", bad
+    # a leading dash never reaches the tool as a key on some Pythons (argparse takes it
+    # for an option), so the rule itself is checked here
+    from fma_tools.xero.main import _KEY_RE
+    assert not _KEY_RE.match("-NSW") and not _KEY_RE.match("_NSW")
+    assert _KEY_RE.match("N") and _KEY_RE.match("NSW-2") and _KEY_RE.match("a_b")
+    assert not _KEY_RE.match("x" * 21) and _KEY_RE.match("x" * 20)
     # and a key that would make the same file name as another is the same key
     code, env = run_cli(["xero", "accounts", "--set-key", "Entity B Pty Ltd", "a"])
     assert code == 1 and env["problems"][0]["code"] == "KEY_IN_USE"
