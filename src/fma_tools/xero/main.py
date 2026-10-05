@@ -309,13 +309,22 @@ def _complete(answer: dict, state: str, verifier: str, port: int, client_id: str
         store.save(store.TOKENS, tokens)
 
     if not granted:
-        # No organisation was newly granted. If this login already holds organisations
-        # here, the person has signed in again -- the cure for a lapsed sign-in -- and
-        # the new sign-in serves every one of them.
+        # Xero named no organisation for this consent. Two honest readings: the person
+        # signed in again for organisations already held here (the cure for a lapsed
+        # sign-in), or Xero's filter did not point at the one just granted. What this
+        # login holds at Xero decides which, and nothing is ever taken by guesswork.
+        everything = client.connections(user_id, access_token=tok["access_token"])
+        unregistered = [c for c in everything if str(c.get("tenantId")) not in rows]
+        named = [c for c in unregistered if expect_org
+                 and (c.get("tenantName") or "").casefold() == expect_org.casefold()]
         known = {tid: r for tid, r in rows.items() if r.get("user_id") == user_id}
-        if known:
-            still = {str(c.get("tenantId")) for c in
-                     client.connections(user_id, access_token=tok["access_token"])}
+        if len(named) == 1:
+            granted = named
+            warnings.append("Xero did not say which organisation this consent granted; "
+                            f"{expect_org!r} was taken because it was asked for by name "
+                            "and this login holds it")
+        elif known:
+            still = {str(c.get("tenantId")) for c in everything}
             with store.locked():
                 keep_sign_in()
             gone = sorted(tenants.key_of(r) for tid, r in known.items() if tid not in still)
@@ -327,10 +336,22 @@ def _complete(answer: dict, state: str, verifier: str, port: int, client_id: str
                     if tid in still}:
                 warnings.append(f"{expect_org!r} is not among the organisations this "
                                 "login holds here")
+            if unregistered:
+                listed = ", ".join(repr(c.get("tenantName")) for c in unregistered)
+                warnings.append(f"connected at Xero under this app but not held here: "
+                                f"{listed}. To take one, run fma xero auth --expect-org "
+                                "\"<its name>\"; to drop it, disconnect it in Xero")
             renewed = sorted(tenants.key_of(r) for tid, r in known.items() if tid in still)
             return ({"action": "auth", "step": "renewed", "organisations": renewed,
                      "authorised_by": email, "connected": len(rows),
                      "cap": tenants.FREE_TIER_CAP}, warnings)
+        elif unregistered:
+            listed = ", ".join(repr(c.get("tenantName")) for c in unregistered)
+            raise Refusal("CONSENT_ORG_NOT_NAMED",
+                          "Xero did not say which organisation this consent granted, so "
+                          f"nothing was saved. This login holds {listed} under this app: "
+                          "run the command again with --expect-org \"<its name>\" to "
+                          "take one.")
     if len(granted) != 1:
         names = ", ".join(repr(c.get("tenantName")) for c in granted) or "none"
         raise Refusal("CONSENT_NOT_ONE_ORG",

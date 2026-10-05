@@ -615,3 +615,43 @@ def test_one_login_taking_companies_over_never_costs_another_its_sign_in(configu
     code, env = run_cli(["xero", "pull", "--as-at", "2026-06-30", "--all", "--reports", "tb",
                          "--out", str(tmp_path / "p")])
     assert code == 0, env["problems"]
+
+
+# If Xero's "which organisation did this consent grant" filter ever answers with
+# nothing, the tool must neither guess nor become unable to connect anything.
+
+def test_a_consent_xero_does_not_attribute_is_never_guessed(configured, browser, run_cli):
+    configured.add_org(Org("t-a", "Entity A Pty Ltd"))
+    configured.event_filter_blind = True
+    configured.will_grant("user-1", "adviser@example.test", ["t-a"])
+    code, env = run_cli(["xero", "auth", "--timeout", "10"])
+    assert code == 1 and env["problems"][0]["code"] == "CONSENT_ORG_NOT_NAMED"
+    assert "'Entity A Pty Ltd'" in env["problems"][0]["message"]
+    assert "--expect-org" in env["problems"][0]["message"]
+    assert _token_file() is None and tenants.registry() == {}
+
+
+def test_naming_the_company_connects_it_when_xero_does_not_attribute(configured, browser, run_cli):
+    configured.add_org(Org("t-a", "Entity A Pty Ltd"))
+    configured.add_org(Org("t-b", "Entity B Pty Ltd"))
+    signed_in(configured, ["t-a"], keys={"t-a": "A"})
+    configured.event_filter_blind = True
+    configured.will_grant("user-1", "adviser@example.test", ["t-b"])
+    code, env = run_cli(["xero", "auth", "--key", "B", "--expect-org", "entity b pty ltd",
+                         "--timeout", "10"])
+    assert code == 0, env["problems"]
+    assert env["data"]["step"] == "connected" and env["data"]["organisation"]["key"] == "B"
+    assert any("asked for by name" in w for w in env["warnings"])
+    assert sorted(tenants.registry()) == ["t-a", "t-b"]
+
+
+def test_a_renewal_says_what_else_that_login_holds_but_takes_none_of_it(configured, browser, run_cli):
+    configured.add_org(Org("t-a", "Entity A Pty Ltd"))
+    configured.add_org(Org("t-x", "Demo Company (AU)"))
+    signed_in(configured, ["t-a"], keys={"t-a": "A"})
+    configured.event_filter_blind = True
+    configured.will_grant("user-1", "adviser@example.test", ["t-x"])       # picked by mistake
+    code, env = run_cli(["xero", "auth", "--timeout", "10"])
+    assert code == 0 and env["data"]["step"] == "renewed"
+    assert sorted(tenants.registry()) == ["t-a"], "an unnamed organisation is not taken"
+    assert any("'Demo Company (AU)'" in w and "not held here" in w for w in env["warnings"])

@@ -132,6 +132,7 @@ class FakeXero:
     rate_limit: list = field(default_factory=list)     # headers for 429s, one per call
     api_status: tuple | None = None                    # force (status, body) on API calls
     delete_status: int | None = None                   # force the answer to a DELETE
+    event_filter_blind: bool = False                   # ?authEventId= matches nothing
     no_scope_for: set = field(default_factory=set)     # path fragments answered 401
     skew_title: dict = field(default_factory=dict)     # (tenant, report) -> title line
     bend_total: dict = field(default_factory=dict)     # (tenant, report, label) -> delta
@@ -223,6 +224,8 @@ class FakeXero:
             user["connections"] = [c for c in user["connections"] if c["id"] != conn_id]
             return Response(204, {}, b"")
         event = (urllib.parse.parse_qs(parsed.query).get("authEventId") or [None])[0]
+        if event is not None and self.event_filter_blind:
+            return self._json(200, [])
         rows = [c for c in user["connections"] if event is None or c["authEventId"] == event]
         return self._json(200, rows)
 
