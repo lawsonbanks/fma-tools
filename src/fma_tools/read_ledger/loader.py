@@ -28,6 +28,10 @@ class SheetGrid:
     # data_type 's') is indistinguishable from a formula by value alone, and
     # evaluating it would fabricate a number Excel displays as text.
     formula_mask: set
+    # What the workbook says wrote it. A Xero export and a file re-saved in Excel
+    # cannot be told apart by their cells; a pull written by `fma xero` can, and
+    # carries no formulas by design.
+    creator: str | None = None
 
 
 def load(path: Path, sheet: str | None = None) -> list[SheetGrid]:
@@ -75,5 +79,6 @@ def load(path: Path, sheet: str | None = None) -> list[SheetGrid]:
             grid.append(vals)
         out.append(SheetGrid(name=ws.title, grid=grid,
                              merged_count=len(ws.merged_cells.ranges),
-                             formula_mask=mask))
+                             formula_mask=mask,
+                             creator=getattr(wb.properties, "creator", None)))
     return out

@@ -11,6 +11,7 @@ agent reads the grid and fills the contract; this tool proves the grid is real.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -53,6 +54,24 @@ def _resolve_sheet(sg: loader.SheetGrid) -> dict:
             "merged_cells": sg.merged_count, "rows": rows}
 
 
+def _is_the_recorded_pull(path: Path) -> bool:
+    """Whether this workbook is, byte for byte, a file the pull record beside it lists.
+
+    A workbook written by `fma xero pull` holds the totals Xero's API returned as
+    values, so it has no formulas -- which is otherwise the mark of a file someone
+    opened and re-saved. What the workbook says about itself is not proof: its
+    `creator` survives a re-save. The proof is the pull's own record, PULL.json, in the
+    same folder, carrying this file's sha256. Edited, re-saved, renamed or moved away
+    from its record, the file is an ordinary workbook again and is warned about."""
+    try:
+        doc = json.loads((path.parent / "PULL.json").read_text())
+        listed = {f["file"]: f["sha256"] for org in doc["organisations"]
+                  for f in org["files"]}
+        return listed.get(path.name) == hashlib.sha256(path.read_bytes()).hexdigest()
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def run(args) -> tuple[dict, list[str]]:
     path = Path(args.file).expanduser().resolve()
     grids = loader.load(path, args.sheet)
@@ -60,9 +79,28 @@ def run(args) -> tuple[dict, list[str]]:
 
     sheets = [_resolve_sheet(sg) for sg in grids]
     meta = metadata.extract(grids[0].grid)
+    # A warning that fires on every file is one nobody reads, so an untouched pull is
+    # recognised and not warned about -- but only on proof (see above).
+    creator = grids[0].creator or ""
+    claims_pull = creator.startswith("fma xero pull")
+    is_group = creator.startswith("fma xero group")
+    pulled = claims_pull and _is_the_recorded_pull(path)
+    if pulled:
+        meta["written_by"] = creator
+    elif claims_pull:
+        warnings.append(
+            f"{path.name} says it was written by {creator}, but it is not a file the "
+            "pull record beside it lists byte for byte (no PULL.json here, or the "
+            "workbook was edited, re-saved, renamed or moved). Its figures are no "
+            "longer Xero's by proof: treat it as a hand-edited workbook")
+    elif is_group:
+        warnings.append(
+            f"{path.name} is a group sheet built by {creator}: sums of a pull, made for "
+            "a person to add eliminations to. It is a derived workbook that may have "
+            "been edited, not an export from Xero")
 
     for s in sheets:
-        if s["formula_count"] == 0:
+        if s["formula_count"] == 0 and not (claims_pull or is_group):
             warnings.append(
                 f"sheet {s['name']!r} carries no live formulas -- either the format "
                 "changed or the file was opened and saved in Excel; the values are "

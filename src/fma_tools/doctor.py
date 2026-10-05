@@ -2,8 +2,9 @@
 
 One line per check on stderr; the JSON twin rides the standard envelope on stdout.
 Every FAIL carries exactly one copy-pasteable fix command. `--fix` runs the fixes that
-are reachable from inside this venv (today: installing Playwright's chromium); anything
-else is named with the exact external command. Exit 0 healthy, 3 problems found.
+are reachable from inside this venv (today: installing Playwright's chromium, and
+making the Xero sign-in folder private); anything else is named with the exact external
+command. Exit 0 healthy, 3 problems found.
 
 Wayne never sees this: his agent runs doctor, runs the fix lines, re-runs doctor until
 it exits 0, and relays "tools healthy".
@@ -35,6 +36,7 @@ _IMPORTS = [
     ("docx", "python-docx", "render --docx"),
     ("pptx", "python-pptx", "render --pptx"),
     ("pymupdf", "pymupdf", "render's PDF read-back gates"),
+    ("certifi", "certifi", "xero's certificate store"),
 ]
 
 
@@ -45,6 +47,9 @@ def add_arguments(p) -> None:
     p.add_argument("--deep", action="store_true",
                    help="end-to-end proof: launch chromium, render a one-page smoke "
                         "PDF, read it back (~3s)")
+    p.add_argument("--xero", action="store_true",
+                   help="also ask Xero which organisations are connected (uses the "
+                        "network; needs a sign-in)")
 
 
 def _check_self() -> str:
@@ -53,15 +58,15 @@ def _check_self() -> str:
 
 
 def _check_subcommands() -> str:
-    """The CLI this doctor lives in really carries all four tools."""
+    """The CLI this doctor lives in really carries all five tools."""
     from .cli import _build_parser
     p = _build_parser()
     sub = next(a for a in p._actions if hasattr(a, "choices") and a.choices)
-    want = {"read-ledger", "reconcile", "render", "doctor"}
+    want = {"read-ledger", "reconcile", "render", "xero", "doctor"}
     missing = want - set(sub.choices)
     if missing:
         raise RuntimeError(f"subcommands missing from this install: {sorted(missing)}")
-    return "read-ledger, reconcile, render, doctor"
+    return "read-ledger, reconcile, render, xero, doctor"
 
 
 def _check_python() -> str:
@@ -138,6 +143,80 @@ def _fix_chromium() -> str:
     return "installed chromium"
 
 
+# -- xero: checked only where it is in use ------------------------------------------
+# A Mac that never pulls from Xero has nothing here to be wrong, and `fma doctor` must
+# still exit 0 on it (and in CI). Once the tool is configured, its sign-in is part of
+# the environment: private files, a client id, and a refresh token Xero has not lapsed.
+
+_XERO_LAPSE_DAYS = 60       # Xero ends a sign-in that has gone unused this long
+_XERO_WARN_DAYS = 45
+
+
+def _check_xero_private() -> str:
+    from .xero import store
+    loose = store.mode_problems()
+    if loose:
+        raise RuntimeError("; ".join(loose))
+    return f"{store.config_dir()} is private"
+
+
+def _fix_xero_private() -> str:
+    from .xero import store
+    d = store.config_dir()
+    os.chmod(d, 0o700)
+    for name in (store.APP, store.TOKENS, store.TENANTS, store.PENDING):
+        if (d / name).exists():
+            os.chmod(d / name, 0o600)
+    return "set 700 / 600"
+
+
+def _check_xero_app() -> str:
+    from .xero import store
+    if not store.load(store.APP).get("client_id"):
+        raise RuntimeError("no Xero app client id is recorded")
+    return "client id recorded"
+
+
+def _check_xero_sign_in() -> str:
+    import time
+    from .xero import store, tenants
+    rows = tenants.registry()
+    needed = {r.get("user_id") for r in rows.values()}
+    # only the sign-ins an organisation here relies on; a leftover one is not a fault
+    users = {u: v for u, v in (store.load(store.TOKENS).get("users") or {}).items()
+             if u in needed}
+    if not rows:
+        return "no organisation connected yet (run: fma xero auth)"
+    if len(users) < len(needed):
+        raise RuntimeError("an organisation is registered here with no saved sign-in")
+    oldest = max((time.time() - float(u.get("refresh_issued_at", 0))) / 86400
+                 for u in users.values())
+    if oldest >= _XERO_LAPSE_DAYS:
+        raise RuntimeError(f"the sign-in was last refreshed {oldest:.0f} days ago; "
+                           f"Xero lapses it at {_XERO_LAPSE_DAYS}")
+    note = (f"; Xero lapses it at {_XERO_LAPSE_DAYS} -- any pull or `fma xero accounts` "
+            "renews it" if oldest >= _XERO_WARN_DAYS else "")
+    return (f"{len(rows)} organisation(s) connected; sign-in refreshed "
+            f"{oldest:.0f} day(s) ago{note}")
+
+
+def _check_xero_live() -> str:
+    from .errors import ToolError
+    from .xero import store, tenants
+    from .xero.client import XeroClient
+    needed = {r.get("user_id") for r in tenants.registry().values()}
+    users = [u for u in (store.load(store.TOKENS).get("users") or {}) if u in needed]
+    if not users:
+        raise RuntimeError("no sign-in to ask Xero with")
+    client, n = XeroClient(), 0
+    for uid in users:
+        try:
+            n += len(client.connections(uid))
+        except ToolError as e:
+            raise RuntimeError("; ".join(p["message"] for p in e.problems))
+    return f"Xero lists {n} connection(s) for this app"
+
+
 def run(args) -> tuple[dict, list[str]]:
     checks = []
 
@@ -158,7 +237,7 @@ def run(args) -> tuple[dict, list[str]]:
             checks.append({"check": name, "status": "FAIL", "detail": str(e), "fix": fix})
 
     do("fma install", _check_self, _REINSTALL)
-    do("all four subcommands wired", _check_subcommands, _REINSTALL)
+    do("all five subcommands wired", _check_subcommands, _REINSTALL)
     do("python >= 3.12", _check_python, _REINSTALL)
     for mod, pip_name, why in _IMPORTS:
         do(f"{pip_name} ({why})", lambda m=mod, n=pip_name: _check_import(m, n), _REINSTALL)
@@ -172,6 +251,17 @@ def run(args) -> tuple[dict, list[str]]:
         do("deep: smoke render + read-back", _check_deep,
            f"{sys.executable} -m playwright install chromium  # then retry; "
            f"if it still fails: {_REINSTALL}")
+    from .xero import store as _xero_store
+    if not _xero_store.config_dir().exists() and not getattr(args, "xero", False):
+        do("xero", lambda: "not configured on this Mac (optional: fma xero config)", None)
+    else:
+        do("xero folder is private", _check_xero_private,
+           f"chmod 700 {_xero_store.config_dir()} && chmod 600 "
+           f"{_xero_store.config_dir()}/*.json", _fix_xero_private)
+        do("xero app", _check_xero_app, _xero_store.CONFIG_FIX)
+        do("xero sign-in", _check_xero_sign_in, _xero_store.AUTH_FIX)
+        if getattr(args, "xero", False):
+            do("xero live: connections", _check_xero_live, _xero_store.AUTH_FIX)
 
     failed = [c for c in checks if c["status"] == "FAIL"]
     data = {"checks": checks, "problems_found": len(failed)}
