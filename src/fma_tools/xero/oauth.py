@@ -225,10 +225,16 @@ def refresh(transport, client_id: str, refresh_token: str) -> dict:
 
 def stamp(token_response: dict, now: float) -> dict:
     """The fields the store keeps from a token response, with absolute times."""
+    try:
+        lifetime = float(token_response.get("expires_in"))
+    except (TypeError, ValueError):
+        # Unreadable, so assume it is already due: the next call refreshes. Never a
+        # reason to lose a sign-in Xero has just issued.
+        lifetime = 0.0
     return {
         "access_token": token_response["access_token"],
         "refresh_token": token_response.get("refresh_token"),
-        "access_expires_at": now + float(token_response.get("expires_in", 0)),
+        "access_expires_at": now + lifetime,
         "refresh_issued_at": now,
         "scope": token_response.get("scope", ""),
     }

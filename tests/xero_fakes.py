@@ -75,6 +75,7 @@ class Org:
     ledger: Ledger = field(default_factory=Ledger)
     at: dict = field(default_factory=dict)  # iso date -> Ledger, for an earlier date
     archived: list = field(default_factory=lambda: [("999", "Old Suspense")])
+    archive_codes: set = field(default_factory=set)   # ledger codes Xero marks ARCHIVED
 
     def books(self, when: str) -> Ledger:
         return self.at.get(when, self.ledger)
@@ -133,6 +134,7 @@ class FakeXero:
     api_status: tuple | None = None                    # force (status, body) on API calls
     delete_status: int | None = None                   # force the answer to a DELETE
     event_filter_blind: bool = False                   # ?authEventId= matches nothing
+    connections_status: int | None = None              # force the answer to GET /connections
     no_scope_for: set = field(default_factory=set)     # path fragments answered 401
     skew_title: dict = field(default_factory=dict)     # (tenant, report) -> title line
     bend_total: dict = field(default_factory=dict)     # (tenant, report, label) -> delta
@@ -223,6 +225,8 @@ class FakeXero:
             conn_id = parsed.path.rsplit("/", 1)[-1]
             user["connections"] = [c for c in user["connections"] if c["id"] != conn_id]
             return Response(204, {}, b"")
+        if self.connections_status is not None:
+            return Response(self.connections_status, {}, b"{}")
         event = (urllib.parse.parse_qs(parsed.query).get("authEventId") or [None])[0]
         if event is not None and self.event_filter_blind:
             return self._json(200, [])
@@ -279,14 +283,15 @@ class FakeXero:
                                     ("income", "REVENUE", "REVENUE"),
                                     ("expenses", "EXPENSE", "EXPENSE")):
                 rows += [{"AccountID": org.account_id(c, n), "Code": c, "Name": n, "Type": typ,
-                          "Class": cls, "Status": "ACTIVE", "TaxType": "NONE"}
+                          "Class": cls, "TaxType": "NONE",
+                          "Status": "ARCHIVED" if c in org.archive_codes else "ACTIVE"}
                          for c, n, _ in getattr(b, group)]
             rows.append({"AccountID": org.account_id("960"), "Code": "960",
                          "Name": "Retained Earnings", "Type": "EQUITY", "Class": "EQUITY",
                          "Status": "ACTIVE", "TaxType": "NONE"})
             rows += [{"AccountID": org.account_id(c), "Code": c, "Name": n, "Type": "EXPENSE",
                       "Class": "EXPENSE", "Status": "ARCHIVED", "TaxType": "NONE"}
-                     for c, n in org.archived]
+                     for c, n in org.archived if c not in org.archive_codes]
             return json.dumps({"Accounts": rows}).encode()
         if path == "Reports/TrialBalance":
             return self._trial_balance(org, q["date"])

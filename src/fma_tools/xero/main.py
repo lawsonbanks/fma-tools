@@ -31,6 +31,11 @@ from . import oauth, pull as pull_mod, store, tenants
 from .client import NETWORK_FIX, XeroClient
 from .transport import default_transport
 
+class _CodeUnspent(EnvProblem):
+    """The code never reached Xero, so the same address can be given again while the
+    code lasts. Any failure AFTER the exchange is not this: the code is spent."""
+
+
 _KEY_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,18}[A-Za-z0-9])?$")
 _KEY_RULE = ("a key is 1 to 20 letters, digits, - or _, beginning and ending with a "
              "letter or digit")
@@ -179,12 +184,10 @@ def _auth(args) -> tuple[dict, list[str]]:
                                args.expect_org or pending.get("expect_org"),
                                args.key or pending.get("key"),
                                tuple(pending.get("scopes") or oauth.SCOPES))
-        except EnvProblem:
-            # Xero was not reached, so the code is unspent: the same address can be
-            # given again while the code lasts.
-            raise
+        except _CodeUnspent:
+            raise                               # the pending consent keeps waiting
         except ToolError:
-            store.delete(store.PENDING)
+            store.delete(store.PENDING)         # used, or can never be used
             raise
         store.delete(store.PENDING)
         return result
@@ -258,8 +261,8 @@ def _complete(answer: dict, state: str, verifier: str, port: int, client_id: str
                       f"Xero would not accept the code ({e.reason}). A code works once "
                       "and for five minutes; run the command again.")
     except oauth.TokenUnavailable as e:
-        raise EnvProblem("XERO_UNREACHABLE", f"could not reach Xero to finish the "
-                                             f"sign-in ({e})", fix=NETWORK_FIX)
+        raise _CodeUnspent("XERO_UNREACHABLE", f"could not reach Xero to finish the "
+                                               f"sign-in ({e})", fix=NETWORK_FIX)
 
     access = oauth.claims(tok.get("access_token"))
     event = access.get("authentication_event_id")
@@ -272,17 +275,61 @@ def _complete(answer: dict, state: str, verifier: str, port: int, client_id: str
                       "saved")
 
     client = XeroClient(transport=transport)
-    granted = client.connections(user_id, auth_event_id=event,
-                                 access_token=tok["access_token"])
     rows = tenants.registry()
     warnings: list[str] = []
     now = time.time()
+    known = {tid: r for tid, r in rows.items() if r.get("user_id") == user_id}
+
+    def save_sign_in() -> None:
+        tokens = store.load(store.TOKENS)
+        tokens.setdefault("users", {})[user_id] = {**oauth.stamp(tok, now), "email": email}
+        store.save(store.TOKENS, tokens)
+
+    def forget_unused_logins() -> None:
+        """A login no organisation here relies on would lapse unnoticed and then fail
+        every check with a fix that cannot cure it."""
+        tokens = store.load(store.TOKENS)
+        needed = {r.get("user_id") for r in tenants.registry().values()}
+        stale = [u for u in (tokens.get("users") or {}) if u not in needed]
+        for u in stale:
+            tokens["users"].pop(u)
+        if stale:
+            store.save(store.TOKENS, tokens)
+
+    def ask(auth_event_id: str | None = None) -> list[dict]:
+        """Ask Xero what this login holds. The code is already spent by now, so a
+        failure here must not waste the sign-in: for a login already held here it is
+        saved first (it serves the organisations that login holds whatever else
+        happened), and the message says what was and was not done."""
+        try:
+            return client.connections(user_id, auth_event_id=auth_event_id,
+                                      access_token=tok["access_token"])
+        except EnvProblem as e:
+            why = "; ".join(p["message"] for p in e.problems)
+            if known:
+                with store.locked():
+                    save_sign_in()
+                raise EnvProblem(
+                    "XERO_UNREACHABLE",
+                    "the sign-in was saved, so the organisations this login already "
+                    "holds here are served again; but Xero could not then be asked "
+                    f"which organisation this consent granted ({why}). See what is "
+                    "live, and add a missing one with: fma xero auth --expect-org "
+                    "\"<its name>\"", fix="fma xero accounts")
+            raise EnvProblem(
+                "XERO_UNREACHABLE",
+                "Xero accepted the sign-in but could not then be asked which "
+                f"organisation it granted ({why}), so nothing was saved here. Run the "
+                "command again: an organisation already connected is renewed, not "
+                "connected twice", fix=store.AUTH_FIX)
 
     def undo(conns: list[dict]) -> str:
         """Remove connections this consent just made and this Mac is not keeping, so
-        nothing is left connected at Xero that nobody here knows about. Says what
-        Xero answered, not what was hoped."""
-        fresh = [c for c in conns if c.get("id") and c.get("tenantId") not in rows]
+        nothing is left connected at Xero that nobody here knows about. A connection
+        this login already holds here is left alone. Says what Xero answered, not what
+        was hoped."""
+        fresh = [c for c in conns if c.get("id")
+                 and (rows.get(str(c.get("tenantId"))) or {}).get("user_id") != user_id]
         if not fresh:
             return ""
         try:
@@ -297,54 +344,68 @@ def _complete(answer: dict, state: str, verifier: str, port: int, client_id: str
         return (" It is still connected at Xero; remove it there under Settings, "
                 "Connected apps.")
 
-    def keep_sign_in() -> None:
-        """Save this login's new sign-in, and forget any login no organisation here
-        uses any more: a sign-in nobody needs would lapse and then fail every check."""
-        tokens = store.load(store.TOKENS)
-        users = tokens.setdefault("users", {})
-        users[user_id] = {**oauth.stamp(tok, now), "email": email}
-        needed = {r.get("user_id") for r in tenants.registry().values()} | {user_id}
-        for stale in [u for u in users if u not in needed]:
-            users.pop(stale)
-        store.save(store.TOKENS, tokens)
-
+    granted = ask(event)
     if not granted:
         # Xero named no organisation for this consent. Two honest readings: the person
         # signed in again for organisations already held here (the cure for a lapsed
         # sign-in), or Xero's filter did not point at the one just granted. What this
         # login holds at Xero decides which, and nothing is ever taken by guesswork.
-        everything = client.connections(user_id, access_token=tok["access_token"])
+        everything = ask()
         unregistered = [c for c in everything if str(c.get("tenantId")) not in rows]
         named = [c for c in unregistered if expect_org
                  and (c.get("tenantName") or "").casefold() == expect_org.casefold()]
-        known = {tid: r for tid, r in rows.items() if r.get("user_id") == user_id}
         if len(named) == 1:
             granted = named
             warnings.append("Xero did not say which organisation this consent granted; "
                             f"{expect_org!r} was taken because it was asked for by name "
                             "and this login holds it")
         elif known:
-            still = {str(c.get("tenantId")) for c in everything}
+            still = {str(c.get("tenantId")): c for c in everything}
             with store.locked():
-                keep_sign_in()
-            gone = sorted(tenants.key_of(r) for tid, r in known.items() if tid not in still)
+                save_sign_in()
+                current = tenants.registry()
+                moved = False
+                for t, c in still.items():      # a company connected again has a new id
+                    r = current.get(t)
+                    if r and r.get("user_id") == user_id and c.get("id") \
+                            and r.get("connection_id") != c["id"]:
+                        r["connection_id"], moved = c["id"], True
+                if moved:
+                    tenants.save_registry(current)
+            renewed = sorted(tenants.key_of(r) for t, r in known.items() if t in still)
+            gone = sorted(tenants.key_of(r) for t, r in known.items() if t not in still)
             if gone:
                 warnings.append("no longer connected at Xero under this login: "
                                 + ", ".join(gone))
-            if expect_org and expect_org.casefold() not in {
-                    (r.get("name") or "").casefold() for tid, r in known.items()
-                    if tid in still}:
-                warnings.append(f"{expect_org!r} is not among the organisations this "
-                                "login holds here")
             if unregistered:
                 listed = ", ".join(repr(c.get("tenantName")) for c in unregistered)
                 warnings.append(f"connected at Xero under this app but not held here: "
                                 f"{listed}. To take one, run fma xero auth --expect-org "
-                                "\"<its name>\"; to drop it, disconnect it in Xero")
-            renewed = sorted(tenants.key_of(r) for tid, r in known.items() if tid in still)
-            return ({"action": "auth", "step": "renewed", "organisations": renewed,
-                     "authorised_by": email, "connected": len(rows),
-                     "cap": tenants.FREE_TIER_CAP}, warnings)
+                                "\"<its name>\"; to drop it, fma xero disconnect --org "
+                                "\"<its name>\"")
+            data = {"action": "auth", "step": "renewed", "organisations": renewed,
+                    "authorised_by": email, "connected": len(rows),
+                    "cap": tenants.FREE_TIER_CAP}
+            not_applied = f" --key {key} was not applied." if key else ""
+            if not renewed:
+                raise Refusal(
+                    "NOTHING_RENEWED",
+                    "the sign-in was saved, but no organisation this login holds here "
+                    f"is connected at Xero any more ({', '.join(gone)}). Connect one "
+                    "again with: fma xero auth --expect-org \"<its name>\"."
+                    + not_applied, data=data)
+            if expect_org and expect_org.casefold() not in {
+                    (r.get("name") or "").casefold() for t, r in known.items()
+                    if t in still}:
+                raise Refusal(
+                    "CONSENT_WRONG_ORG",
+                    f"asked for {expect_org!r}, which this consent did not connect. The "
+                    f"sign-in was renewed for {', '.join(renewed)} and nothing else "
+                    "changed." + not_applied, data=data)
+            if key:
+                warnings.append(f"--key {key} was not applied: no organisation was "
+                                "newly connected")
+            return data, warnings
         elif unregistered:
             listed = ", ".join(repr(c.get("tenantName")) for c in unregistered)
             raise Refusal("CONSENT_ORG_NOT_NAMED",
@@ -373,16 +434,37 @@ def _complete(answer: dict, state: str, verifier: str, port: int, client_id: str
         key = None
 
     with store.locked():
-        rows = tenants.registry()
-        previous = rows.get(tid) or {}
-        rows[tid] = {
-            "key": key or previous.get("key"), "name": name,
-            "type": conn.get("tenantType") or "", "connection_id": conn.get("id") or "",
-            "user_id": user_id, "authorised_by": email, "auth_event_id": event,
-            "connected_at": conn.get("createdDateUtc") or "",
-            "saved_at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")}
-        tenants.save_registry(rows)
-        keep_sign_in()
+        try:
+            # The sign-in first: if the second write fails, an extra sign-in is
+            # harmless, where a company pointing at a login with none is not.
+            save_sign_in()
+            rows = tenants.registry()
+            previous = rows.get(tid) or {}
+            rows[tid] = {
+                "key": key or previous.get("key"), "name": name,
+                "type": conn.get("tenantType") or "",
+                "connection_id": conn.get("id") or "",
+                "user_id": user_id, "authorised_by": email, "auth_event_id": event,
+                "connected_at": conn.get("createdDateUtc") or "",
+                "saved_at": datetime.fromtimestamp(now, timezone.utc)
+                                    .isoformat(timespec="seconds")}
+            tenants.save_registry(rows)
+        except OSError as e:
+            raise EnvProblem(
+                "XERO_STORE_NOT_SAVED",
+                f"Xero connected {name!r}, but that could not be saved here "
+                f"({e.strerror or type(e).__name__}); it is still connected at Xero. "
+                f"Fix the folder {store.config_dir()} and run: fma xero auth "
+                f"--expect-org \"{name}\"", fix="fma doctor --fix")
+        try:
+            forget_unused_logins()
+        except OSError:
+            pass                    # an extra sign-in is ignored and swept next time
+    if previous.get("user_id") and previous["user_id"] != user_id:
+        warnings.append(f"{name!r} was held under another login "
+                        f"({previous.get('authorised_by') or 'unnamed'}); that login's "
+                        "own connection to it is still at Xero, and can be removed "
+                        "there if it is no longer wanted")
 
     granted_scopes = set((tok.get("scope") or "").split())
     missing = [s for s in asked if s not in granted_scopes] if granted_scopes else []

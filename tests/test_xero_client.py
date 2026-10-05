@@ -319,3 +319,69 @@ def test_a_refresh_answer_without_a_new_token_never_blanks_the_old_one(one, monk
     monkeypatch.setattr(oauth, "refresh", without_rotation)
     XeroClient().get("user-1", "t-a", "Organisation")
     assert _saved_refresh_token() == old
+
+
+def test_the_guards_survive_a_test_that_undoes_its_patches(monkeypatch):
+    # The floor under the per-test guards: even with every monkeypatch undone, the
+    # sign-in folder is a throwaway and the transport refuses.
+    from pathlib import Path
+    from fma_tools.xero import transport
+    with monkeypatch.context() as m:
+        m.delenv("FMA_CONFIG_DIR", raising=False)
+    monkeypatch.undo()
+    try:
+        assert "fma-config-session-" in str(store.config_dir())
+        assert Path.home() / ".config" not in store.config_dir().parents
+        with pytest.raises(AssertionError):
+            transport.default_transport()
+    finally:
+        pass
+
+
+def test_a_body_cut_off_while_it_is_being_read_is_a_failed_connection(monkeypatch):
+    import http.client
+    import urllib.error
+    import urllib.request
+    from fma_tools.xero import transport
+
+    class CutOff:
+        status = 200
+        headers = {}
+
+        def read(self):
+            raise http.client.IncompleteRead(b"half")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: CutOff())
+    with pytest.raises(transport.TransportError) as e:
+        transport.UrllibTransport().request("GET", "https://example.test/x", {})
+    assert str(e.value) == "IncompleteRead"
+
+    class Unreadable(urllib.error.HTTPError):
+        def read(self, *a):
+            raise http.client.IncompleteRead(b"")
+
+    def refused(*a, **k):
+        raise Unreadable("https://example.test/x", 503, "Service Unavailable",
+                         {"Retry-After": "3"}, None)
+    monkeypatch.setattr(urllib.request, "urlopen", refused)
+    r = transport.UrllibTransport().request("GET", "https://example.test/x", {})
+    assert (r.status, r.body, r.headers) == (503, b"", {"retry-after": "3"})
+
+
+def test_a_token_answer_with_an_unreadable_lifetime_does_not_lose_the_sign_in(one, monkeypatch):
+    from fma_tools.xero import oauth
+    signed_in(one, ["t-a"], expired=True)
+    real = oauth.refresh
+
+    def strange(transport, client_id, refresh_token):
+        answer = real(transport, client_id, refresh_token)
+        answer["expires_in"] = None
+        return answer
+    monkeypatch.setattr(oauth, "refresh", strange)
+    XeroClient().get("user-1", "t-a", "Organisation")
+    assert _saved_refresh_token() in one.refresh_tokens, "the new sign-in was saved"

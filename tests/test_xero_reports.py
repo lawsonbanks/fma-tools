@@ -150,3 +150,36 @@ def test_a_footing_that_could_not_run_is_said_not_skipped():
     bank.lines.append(reports.Line("summary", "Total Bank (again)", [Decimal("1")] * 3))
     again = [t for t in reports.section_ties(rep, "bs") if t.name == "bs: Bank"]
     assert again and again[0].status == "not_checked" and "more than one total" in again[0].detail
+
+
+@pytest.mark.parametrize("asked, title, outcome", [
+    (("2026-06-01", "2026-06-30"), "For the month ended 30 June 2026", True),
+    (("2026-04-01", "2026-06-30"), "For the quarter ended 30 June 2026", True),
+    (("2026-04-01", "2026-06-30"), "For the 3 months ended 30 June 2026", True),
+    (("2025-07-01", "2026-06-30"), "For the 12 months ended 30 June 2026", True),
+    (("2025-07-01", "2026-06-30"), "For the year ended 30 June 2026", True),
+    # the end matches, the span does not
+    (("2025-07-01", "2026-06-30"), "For the 3 months ended 30 June 2026", "refuse"),
+    (("2026-06-01", "2026-06-30"), "For the 12 months ended 30 June 2026", "refuse"),
+    (("2025-07-01", "2026-06-30"), "For the month ended 30 June 2026", "refuse"),
+    # the words settle nothing, so the start is as asked, not as proved
+    (("2026-06-01", "2026-06-15"), "For the month ended 15 June 2026", False),
+    (("2026-06-01", "2026-06-30"), "Period ending 30 June 2026", False),
+])
+def test_a_title_that_names_an_end_and_a_span(asked, title, outcome):
+    rep = reports.Report(["Profit & Loss", "Entity A Pty Ltd", title], ["", "x"], [])
+    start, end = (date.fromisoformat(d) for d in asked)
+    if outcome == "refuse":
+        with pytest.raises(Refusal) as e:
+            reports.prove_range(rep, start, end, "pl")
+        assert e.value.code == "DATE_MISMATCH"
+    else:
+        assert reports.prove_range(rep, start, end, "pl") is outcome
+
+
+def test_a_blank_total_is_not_a_footing_that_passed():
+    rep = reports.parse(_balance_sheet())
+    bank = next(s for s in rep.sections if s.title == "Bank")
+    bank.lines[-1].values[0] = None                     # the total cell came back empty
+    ties = {t.name: t.status for t in reports.section_ties(rep, "bs")}
+    assert ties["bs: Total Bank (30 Apr 2019)"] == "not_checked"

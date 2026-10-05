@@ -268,9 +268,10 @@ def test_accounts_with_no_code_are_never_lined_up_by_what_their_names_contain(xe
     assert payable[2] == "LIABILITY", "a bank asset was not netted into it"
     # and a person is told
     diffs = [[c.value for c in r] for r in wb["Chart differences"].iter_rows()][5:]
-    said = [d for d in diffs if d[0] == "No code: not lined up"]
+    said = [d for d in diffs if d[0] == "Not lined up"]
     assert sorted(d[2] for d in said) == ["PayPal (USD)", "Term Deposit (800)",
                                           "Wise (USD)", "Wise (USD)"]
+    assert all("the account has no code" in d[3] for d in said)
     total = next(r for r in rows if r[1] == "Total (debits less credits)")
     assert total[a] == 0 and total[b] == 0
 
@@ -311,3 +312,89 @@ def test_a_mapping_that_excel_saved_badly_is_exit_2_not_a_bug(pulled, run_cli, t
     mapping.write_text("entity,code,group_code\nA,404,404,one,cell,too,many\n")
     code, env = _group(run_cli, pulled, tmp_path / "g.xlsx", "--mapping", str(mapping))
     assert code == 2 and "line 2 has more cells than the header" in env["problems"][0]["message"]
+
+
+def test_an_archived_account_that_still_holds_a_balance_is_accounted_for(xero, run_cli, tmp_path):
+    # A's 470 is archived but carries 900; B's 470 is a different, active account. The
+    # balances share the line (the code is the rule) -- so the sheet that exists to
+    # flag exactly this must say so, not claim A has no 470.
+    a = xero.add_org(Org("t-a", "Entity A Pty Ltd"))
+    a.ledger.expenses.append(("470", "Old Motor Vehicle Costs", 900))
+    xero.add_org(Org("t-b", "Entity B Pty Ltd", ledger=Ledger(
+        expenses=[("400", "Advertising", 6000), ("404", "Bank Fees", 1000),
+                  ("470", "Subscriptions", 500), ("477", "Wages and Salaries", 21000)])))
+    a.archive_codes = {"470"}
+    signed_in(xero, ["t-a", "t-b"], keys={"t-a": "A", "t-b": "B"})
+    pull = tmp_path / "pull"
+    assert run_cli(["xero", "pull", "--as-at", AS_AT, "--all", "--out", str(pull)])[0] == 0
+    out = tmp_path / "g.xlsx"
+    code, env = _group(run_cli, pull, out)
+    assert code == 0, env["problems"]
+    wb = openpyxl.load_workbook(out)
+    _, by_code = _table(wb["Group"])
+    assert (by_code["470"]["Entity A Pty Ltd"], by_code["470"]["Entity B Pty Ltd"]) == (900, 500)
+    diffs = {(r[0].value, r[1].value): r[3].value for r in wb["Chart differences"].iter_rows(min_row=6)}
+    assert ("One code, different names", "470") in diffs
+    assert "A: Old Motor Vehicle Costs; B: Subscriptions" == diffs[("One code, different names", "470")]
+    assert ("In some organisations only", "470") not in diffs, "A does have a 470"
+
+
+def test_a_group_code_that_looks_like_a_typo_is_said(pulled, run_cli, tmp_path):
+    mapping = tmp_path / "mapping.csv"
+    mapping.write_text("entity,code,group_code\nC,410,4O4\nB,405,404\n")     # letter O
+    out = tmp_path / "g.xlsx"
+    code, env = _group(run_cli, pulled, out, "--mapping", str(mapping))
+    assert code == 0, "a group code may be new on purpose, so this cannot refuse"
+    assert any("mapping line 2 sends C 410 to group code '4O4'" in w and "typo" in w
+               for w in env["warnings"])
+    assert not any("line 3" in w for w in env["warnings"]), "404 is a real code"
+
+
+def test_mapping_line_numbers_are_the_ones_a_person_sees(pulled, run_cli, tmp_path):
+    mapping = tmp_path / "mapping.csv"
+    mapping.write_text("entity,code,group_code,group_name\n"
+                       "A,404,404,Bank fees\n"
+                       "\n"
+                       "\n"
+                       "C,41O,404,\n")
+    code, env = _group(run_cli, pulled, tmp_path / "g.xlsx", "--mapping", str(mapping))
+    assert code == 1
+    assert env["problems"][0]["message"] == "line 5: C has no account coded '41O'"
+
+
+def test_a_mapping_with_a_header_and_nothing_else_maps_nothing(pulled, run_cli, tmp_path):
+    mapping = tmp_path / "mapping.csv"
+    mapping.write_text("entity,code,group_code\n")
+    code, env = _group(run_cli, pulled, tmp_path / "g.xlsx", "--mapping", str(mapping))
+    assert code == 0 and env["data"]["mapping_lines"] == 0
+
+
+def test_an_out_that_is_a_folder_is_exit_2(pulled, run_cli, tmp_path):
+    folder = tmp_path / "group.xlsx"
+    folder.mkdir()
+    code, env = _group(run_cli, pulled, folder, "--replace")
+    assert code == 2 and env["problems"][0]["code"] == "OUT_IS_A_FOLDER"
+
+
+def test_an_account_missing_from_the_chart_is_explained_as_that(pulled, run_cli, tmp_path):
+    import hashlib
+    record_path = pulled / "PULL.json"
+    doc = json.loads(record_path.read_text())
+    raw = pulled / "raw" / "ACME_B_Accounts.json"
+    chart = json.loads(raw.read_text())
+    chart["Accounts"] = [a for a in chart["Accounts"] if a["Code"] != "610"]
+    blob = json.dumps(chart).encode()
+    raw.write_bytes(blob)
+    for org in doc["organisations"]:
+        for r in org["raw"]:
+            if r["file"].endswith("ACME_B_Accounts.json"):
+                r["sha256"] = hashlib.sha256(blob).hexdigest()
+    record_path.write_text(json.dumps(doc))
+    out = tmp_path / "g.xlsx"
+    code, env = _group(run_cli, pulled, out)
+    assert code == 0
+    diffs = [[c.value for c in r] for r in
+             openpyxl.load_workbook(out)["Chart differences"].iter_rows(min_row=6)]
+    alone = [d for d in diffs if d[0] == "Not lined up"]
+    assert len(alone) == 1 and "not in the chart that was pulled" in alone[0][3]
+    assert "in B" in alone[0][3]

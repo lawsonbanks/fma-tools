@@ -85,18 +85,21 @@ def _load_mapping(path: Path | None, keys: set[str]) -> dict:
         raise InputProblem("MAPPING_INVALID",
                            f"{path.name} is not UTF-8 text; in Excel, save it as "
                            "'CSV UTF-8 (Comma delimited)'")
-    rows = list(csv.DictReader(text.splitlines()))
-    have = {(h or "").strip().lower() for h in (rows[0].keys() if rows else []) if h}
-    if not rows or not {"entity", "code", "group_code"} <= have:
+    reader = csv.reader(text.splitlines(keepends=True))
+    header = [h.strip().lower() for h in next(reader, [])]
+    if not {"entity", "code", "group_code"} <= set(header):
         raise InputProblem("MAPPING_INVALID",
                            f"{path.name} needs the columns entity, code, group_code "
                            "(group_name and intercompany are optional)")
     out, folded = {}, {k.casefold(): k for k in keys}
-    for n, raw in enumerate(rows, start=2):
-        if None in raw:
+    for cells in reader:
+        n = reader.line_num             # the line a person sees in their editor
+        if not any(c.strip() for c in cells):
+            continue
+        if len(cells) > len(header):
             raise InputProblem("MAPPING_INVALID",
                                f"{path.name} line {n} has more cells than the header")
-        r = {(k or "").strip().lower(): (v or "").strip() for k, v in raw.items()}
+        r = {h: c.strip() for h, c in zip(header, cells)}
         if not r.get("entity") and not r.get("code"):
             continue
         entity = folded.get(r.get("entity", "").casefold())
@@ -154,10 +157,11 @@ def _entity(pull: Path, record: dict) -> dict:
                           f"{key}: {ln.label!r} carries {v!r} where a number belongs")
         return v or Decimal(0)
 
-    balances, total = [], Decimal(0)
+    balances, total, on_the_tb = [], Decimal(0), set()
     for n, (sec, ln) in enumerate((s, ln) for s in rep.sections for ln in s.lines):
         if ln.kind != "row":
             continue
+        on_the_tb.add(ln.account_id)
         balance = amount(ln, cols["ytd debit"]) - amount(ln, cols["ytd credit"])
         known = by_id.get(ln.account_id or "")
         balances.append({
@@ -165,6 +169,9 @@ def _entity(pull: Path, record: dict) -> dict:
             "code": known["code"] if known else "",
             "name": (known["name"] if known and known["name"] else ln.label.strip()),
             "own": ln.account_id or f"line-{n}",
+            "alone_because": ("" if known and known["code"] else
+                              "the account has no code" if known else
+                              "the account is not in the chart that was pulled"),
             "class": ((known or {}).get("class") or "").upper()
                      or _SECTION_CLASS.get(sec.title.strip().upper(), sec.title.upper()),
             "type": (known or {}).get("type") or "", "balance": balance})
@@ -180,8 +187,11 @@ def _entity(pull: Path, record: dict) -> dict:
             "tb_file": tb_file["file"], "tb_sha256": tb_file["sha256"],
             "balances": balances,
             "codes": {a["code"] for a in chart if a["code"]},
+            # What the differences sheet compares: every active account, and any other
+            # (an archived one, say) that still has a line in the trial balance -- its
+            # balance is on the sheet, so its code and name must be accounted for too.
             "chart": [{"code": a["code"], "name": a["name"]} for a in chart
-                      if a["status"].upper() in ("", "ACTIVE")]}
+                      if a["status"].upper() in ("", "ACTIVE") or a["id"] in on_the_tb]}
 
 
 def _differences(entities: list[dict], mapping: dict) -> list[list]:
@@ -200,9 +210,9 @@ def _differences(entities: list[dict], mapping: dict) -> list[list]:
             entry = names.setdefault(a["name"].strip().casefold(), [a["name"].strip(), set()])
             entry[1].add(code)
         for a in e["balances"]:
-            if not a["code"]:
-                out.append(["No code: not lined up", None, a["name"],
-                            f"in {e['key']}: the account has no code, so it stands on a "
+            if a["alone_because"]:
+                out.append(["Not lined up", None, a["name"],
+                            f"in {e['key']}: {a['alone_because']}, so it stands on a "
                             "line of its own"])
     if len(keys) > 1:
         for code in sorted(codes):
@@ -227,6 +237,8 @@ def run(args) -> tuple[dict, list[str]]:
     out = _abs(args.out, "--out")
     if out.suffix.lower() != ".xlsx":
         raise InputProblem("OUT_NOT_XLSX", f"--out must end in .xlsx, got {out.name}")
+    if out.is_dir():
+        raise InputProblem("OUT_IS_A_FOLDER", f"{out} is a folder, not a workbook")
     if out.exists() and not args.replace:
         raise Refusal("OUT_EXISTS",
                       f"{out.name} already exists and may hold eliminations someone "
@@ -283,6 +295,19 @@ def run(args) -> tuple[dict, list[str]]:
             problems=[{"code": "MAPPING_UNMATCHED",
                        "message": f"line {n}: {ek} has no account coded {code!r}"}
                       for n, ek, code in sorted(unmatched)])
+
+    # A group code may be new on purpose, so this cannot refuse; but one that no chart
+    # has and only one line uses is how a typo in that column looks.
+    every_code = set().union(*(e["codes"] for e in entities))
+    uses: dict = {}
+    for (ek, code), m in mapping.items():
+        uses.setdefault(m["group_code"], []).append((m["line"], ek, code))
+    for gcode, where in sorted(uses.items()):
+        if gcode not in every_code and len(where) == 1:
+            n, ek, code = where[0]
+            warnings.append(f"mapping line {n} sends {ek} {code} to group code "
+                            f"{gcode!r}, which is in no organisation's chart and on no "
+                            "other line: check it is not a typo")
 
     rows: dict = {}
     applied = set()

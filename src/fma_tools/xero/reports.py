@@ -225,22 +225,25 @@ def prove_as_at(report: Report, as_at: date, what: str) -> None:
                       f"{line!r}")
 
 
-_ENDED = re.compile(r"\b(month|quarter|year)\s+ended\b", re.IGNORECASE)
+_ENDED = re.compile(r"\b(?:(\d+)\s+months?|(month|quarter|year))\s+ended\b", re.IGNORECASE)
 
 
 def _implied_start(line: str, end: date) -> date | None:
-    """The first day of the period a title like "For the month ended ..." names."""
+    """The first day of the period a title like "For the month ended ..." or "For the
+    3 months ended ..." names -- or None when the words do not settle it. A span is
+    counted in whole months, so it settles nothing unless the end is a month end:
+    "the month ended 15 June" could start on the 1st or on 16 May."""
     m = _ENDED.search(line or "")
-    if not m:
+    if not m or end != _month_end(end):
         return None
-    span = m.group(1).lower()
-    if span == "month":
-        return end.replace(day=1)
-    months = 3 if span == "quarter" else 12
+    months = int(m.group(1)) if m.group(1) else \
+        {"month": 1, "quarter": 3, "year": 12}[m.group(2).lower()]
+    if not 1 <= months <= 120:
+        return None
     y, mth = end.year, end.month - months + 1
     while mth < 1:
         y, mth = y - 1, mth + 12
-    return date(y, mth, 1) if end == _month_end(end) else None
+    return date(y, mth, 1)
 
 
 def _month_end(d: date) -> date:

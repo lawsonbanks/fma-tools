@@ -8,10 +8,26 @@ before proving read-ledger returns the true figure.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import zipfile
 from pathlib import Path
 
 import pytest
+
+# Session-wide floor under the per-test guards below. A test that undoes its
+# monkeypatches (or forgets a fixture) falls back to THIS -- a throwaway folder and a
+# transport that refuses -- never to the real sign-in folder or the real network.
+os.environ["FMA_CONFIG_DIR"] = tempfile.mkdtemp(prefix="fma-config-session-")
+
+
+def _no_network():
+    raise AssertionError("a test reached for the real Xero transport; inject a fake")
+
+
+from fma_tools.xero import transport as _xero_transport  # noqa: E402
+
+_xero_transport._FACTORY = _no_network
 
 
 @pytest.fixture(autouse=True)
@@ -23,11 +39,7 @@ def _xero_cannot_reach_anything_real(tmp_path_factory, monkeypatch):
     careless test run could end a live sign-in -- or call a client's ledger. So the
     sign-in folder is a fresh temp folder, and the real transport refuses to exist."""
     monkeypatch.setenv("FMA_CONFIG_DIR", str(tmp_path_factory.mktemp("fma-config")))
-    from fma_tools.xero import transport
-
-    def _no_network():
-        raise AssertionError("a test reached for the real Xero transport; inject a fake")
-    monkeypatch.setattr(transport, "_FACTORY", _no_network)
+    monkeypatch.setattr(_xero_transport, "_FACTORY", _no_network)
 
 
 @pytest.fixture

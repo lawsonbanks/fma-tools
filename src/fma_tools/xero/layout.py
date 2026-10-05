@@ -137,7 +137,11 @@ def write_workbook(path: Path, sheets: list[tuple[str, list[list]]],
         meta = metadata.extract(grids[0].grid)
         _check_read_back(meta, sheets[0][1], expect, path.name)
         digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp, path)
+        except OSError as e:
+            raise InputProblem("CANNOT_WRITE",
+                               f"cannot put {path.name} in place ({e.strerror or e})")
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             tmp.unlink()
