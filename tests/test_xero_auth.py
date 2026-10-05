@@ -190,6 +190,7 @@ def test_a_renewal_says_which_companies_have_gone(configured, browser, run_cli):
     code, env = run_cli(["xero", "auth", "--timeout", "10"])
     assert code == 0 and env["data"]["organisations"] == ["A"]
     assert any("no longer connected at Xero under this login: B" in w for w in env["warnings"])
+    assert not any("not held here" in w for w in env["warnings"]), "A is held here"
 
 
 def test_a_renewal_that_did_not_bring_back_the_company_asked_for_refuses(configured, browser, run_cli):
@@ -221,13 +222,11 @@ def test_a_company_connected_again_takes_its_new_connection_id(configured, brows
     configured.add_org(Org("t-a", "Entity A Pty Ltd"))
     signed_in(configured, ["t-a"], keys={"t-a": "A"})
     configured.users["user-1"]["connections"][0]["id"] = "conn-new"     # reconnected at Xero
-    configured.event_filter_blind = True
-    configured.will_grant("user-1", "adviser@example.test", ["t-a"])
-    configured.users["user-1"]["connections"]  # (will_grant re-adds on exchange)
+    configured.will_grant("user-1", "adviser@example.test", [], event="event-renewal")
     code, env = run_cli(["xero", "auth", "--timeout", "10"])
     assert code == 0 and env["data"]["step"] == "renewed"
-    held = configured.users["user-1"]["connections"][0]["id"]
-    assert tenants.registry()["t-a"]["connection_id"] == held
+    assert configured.users["user-1"]["connections"][0]["id"] == "conn-new"
+    assert tenants.registry()["t-a"]["connection_id"] == "conn-new"
     assert run_cli(["xero", "disconnect", "--org", "A"])[0] == 0
     assert configured.users["user-1"]["connections"] == [], "disconnect reached the live one"
 
@@ -264,23 +263,33 @@ def test_a_known_login_keeps_its_new_sign_in_even_if_xero_then_goes_quiet(config
     assert code == 0 and env["data"]["organisations"][0]["status"] == "live"
 
 
-def test_a_save_that_fails_at_the_last_step_says_what_is_and_is_not_saved(configured, browser, run_cli, monkeypatch):
-    # A works under login 1; login 2 re-authorises it; the folder cannot be written.
+@pytest.mark.parametrize("unwritable", [store.TOKENS, store.TENANTS])
+def test_a_save_that_fails_at_the_last_step_says_what_is_and_is_not_saved(
+        configured, browser, run_cli, monkeypatch, unwritable):
+    # A works under login 1; login 2 re-authorises it; one of the two files cannot be
+    # written. The sign-in goes first, so whichever write fails, A is never left
+    # pointing at a login that has no sign-in.
     import os
     configured.add_org(Org("t-a", "Entity A Pty Ltd"))
     signed_in(configured, ["t-a"], keys={"t-a": "A"})
     configured.will_grant("user-2", "other@example.test", ["t-a"])
+    real = os.replace
 
     def no_replace(src, dst):
-        raise OSError(28, "No space left on device")
+        if str(dst).endswith(unwritable):
+            raise OSError(28, "No space left on device")
+        return real(src, dst)
     with monkeypatch.context() as m:        # never monkeypatch.undo(): it would also
         m.setattr(os, "replace", no_replace)  # undo the guards that keep tests off
         code, env = run_cli(["xero", "auth", "--timeout", "10"])   # a real sign-in
     assert code == 3 and env["problems"][0]["code"] == "XERO_STORE_NOT_SAVED"
     assert "still connected at Xero" in env["problems"][0]["message"]
-    # nothing here changed: A still points at the login that has a sign-in
     assert tenants.registry()["t-a"]["user_id"] == "user-1"
-    assert list(store.load(store.TOKENS)["users"]) == ["user-1"]
+    assert "user-1" in store.load(store.TOKENS)["users"]
+    if unwritable == store.TOKENS:
+        assert list(store.load(store.TOKENS)["users"]) == ["user-1"], "nothing changed"
+    code, env = run_cli(["xero", "accounts"])
+    assert code == 0 and env["data"]["organisations"][0]["status"] == "live"
 
 
 def test_a_wrong_company_already_held_under_another_login_is_still_undone(configured, browser, run_cli):
@@ -490,6 +499,10 @@ def test_pkce_matches_the_standards_own_example():
         "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
     verifier, challenge = oauth.new_pkce()
     assert 43 <= len(verifier) <= 128 and challenge == oauth.challenge_for(verifier)
+    assert set(verifier) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                                "0123456789-._~")
+    assert len({oauth.new_pkce()[0] for _ in range(5)} | {verifier}) == 6, \
+        "a verifier that repeats is a password anyone who saw one link holds"
 
 
 def test_every_requested_scope_is_read_only():
@@ -573,9 +586,10 @@ def test_a_permission_xero_rejects_can_be_left_out_without_a_new_build(configure
 
 
 def test_without_cannot_drop_what_keeps_the_sign_in_alive_or_invent_a_scope(configured, run_cli):
-    code, env = run_cli(["xero", "auth", "--without", "offline_access"])
+    code, env = run_cli(["xero", "auth", "--without", "offline_access", "--timeout", "5"])
     assert code == 1 and env["problems"][0]["code"] == "SCOPE_REQUIRED"
-    code, env = run_cli(["xero", "auth", "--without", "accounting.transactions"])
+    code, env = run_cli(["xero", "auth", "--without", "accounting.transactions",
+                         "--timeout", "5"])
     assert code == 2 and env["problems"][0]["code"] == "SCOPE_UNKNOWN"
 
 
@@ -707,7 +721,7 @@ def test_a_pasted_answer_that_can_never_work_ends_the_wait(configured, run_cli):
 
 
 def test_a_key_may_not_end_in_what_a_file_name_drops(configured, run_cli):
-    code, env = run_cli(["xero", "auth", "--key", "NSW_"])
+    code, env = run_cli(["xero", "auth", "--key", "NSW_", "--timeout", "5"])
     assert code == 2 and env["problems"][0]["code"] == "KEY_INVALID"
 
 
@@ -792,3 +806,187 @@ def test_a_stray_connection_can_be_let_go_from_this_side(xero, run_cli):
     assert sorted(tenants.registry()) == ["t-a"]
     code, env = run_cli(["xero", "accounts"])
     assert code == 0 and env["data"]["connected_at_xero"] == 1
+
+
+# -- what a mutation pass found unpinned ----------------------------------------------
+
+def _paste(configured, run_cli, *extra):
+    """Start a pasted consent; return the query of the link and the address it lands on."""
+    code, env = run_cli(["xero", "auth", "--paste", *extra])
+    assert code == 0, env["problems"]
+    q = {k: v[0] for k, v in urllib.parse.parse_qs(
+        urllib.parse.urlparse(env["data"]["link"]).query).items()}
+    configured.expected_challenge = q["code_challenge"]
+    return q, f"{q['redirect_uri']}?code={configured.good_code}&state={q['state']}"
+
+
+def test_config_refuses_a_port_no_app_could_register(xero, run_cli):
+    code, env = run_cli(["xero", "config", "--client-id", CLIENT_ID, "--port", "80"])
+    assert code == 2 and env["problems"][0]["code"] == "PORT_INVALID"
+    assert store.load(store.APP) == {}, "nothing is half-saved"
+
+
+def test_accounts_with_nothing_connected_is_exit_3_with_the_fix(configured, run_cli):
+    code, env = run_cli(["xero", "accounts"])
+    assert code == 3 and env["problems"][0]["code"] == "XERO_NOT_SIGNED_IN"
+    assert env["problems"][0]["fix"] == "fma xero auth"
+    assert not configured.log, "there is nobody to ask Xero as"
+
+
+def test_disconnect_says_which_organisation_or_refuses(configured, run_cli):
+    code, env = run_cli(["xero", "disconnect"])
+    assert code == 1 and env["problems"][0]["code"] == "ORG_REQUIRED"
+
+
+def test_a_removal_xero_refuses_does_not_forget_the_connection(xero, run_cli):
+    xero.add_org(Org("t-a", "Entity A Pty Ltd"))
+    signed_in(xero, ["t-a"], keys={"t-a": "A"})
+    xero.delete_status = 500
+    code, env = run_cli(["xero", "disconnect", "--org", "A"])
+    assert code == 3 and env["problems"][0]["code"] == "XERO_UNREACHABLE"
+    assert "t-a" in tenants.registry() and len(xero.users["user-1"]["connections"]) == 1
+
+
+def test_a_stray_name_two_logins_both_hold_is_not_guessed(xero, run_cli):
+    for t, n in (("t-a", "Entity A Pty Ltd"), ("t-b", "Entity B Pty Ltd"),
+                 ("t-x", "Demo Company (AU)"), ("t-y", "Demo Company (AU)")):
+        xero.add_org(Org(t, n))
+    signed_in(xero, ["t-a"], keys={"t-a": "A"})
+    signed_in(xero, ["t-b"], keys={"t-b": "B"}, user_id="user-2", email="other@example.test")
+    for uid, tid in (("user-1", "t-x"), ("user-2", "t-y")):
+        xero.users[uid]["connections"].append(
+            {"id": f"conn-{tid}", "authEventId": "old", "tenantId": tid,
+             "tenantType": "ORGANISATION", "tenantName": "Demo Company (AU)"})
+    code, env = run_cli(["xero", "disconnect", "--org", "Demo Company (AU)"])
+    assert code == 1 and env["problems"][0]["code"] == "ORG_UNKNOWN"
+    assert [len(xero.users[u]["connections"]) for u in ("user-1", "user-2")] == [2, 2]
+
+
+def test_the_wrong_company_that_is_already_held_here_is_left_connected(configured, browser, run_cli):
+    # Login 1 holds A here and means to add B, but picks A again at Xero. Refusing is
+    # right; "undoing" would cut the connection A's pulls run on.
+    configured.add_org(Org("t-a", "Entity A Pty Ltd"))
+    signed_in(configured, ["t-a"], keys={"t-a": "A"})
+    configured.will_grant("user-1", "adviser@example.test", ["t-a"])
+    code, env = run_cli(["xero", "auth", "--expect-org", "Entity B Pty Ltd", "--timeout", "10"])
+    assert code == 1 and env["problems"][0]["code"] == "CONSENT_WRONG_ORG"
+    assert "disconnected again" not in env["problems"][0]["message"]
+    assert [c["tenantId"] for c in configured.users["user-1"]["connections"]] == ["t-a"]
+    code, env = run_cli(["xero", "accounts"])
+    assert code == 0 and env["data"]["organisations"][0]["status"] == "live"
+
+
+def test_a_login_that_holds_nothing_here_renews_nothing_of_anothers(configured, browser, run_cli):
+    # A is held here under login 1. Login 2 can see A at Xero too, signs in, and Xero
+    # names nothing as granted. A's row is login 1's: this is not a renewal of it.
+    configured.add_org(Org("t-a", "Entity A Pty Ltd"))
+    signed_in(configured, ["t-a"], keys={"t-a": "A"})
+    configured.users["user-2"] = {"email": "other@example.test", "connections": [
+        {"id": "conn-user-2-t-a", "authEventId": "old", "tenantId": "t-a",
+         "tenantType": "ORGANISATION", "tenantName": "Entity A Pty Ltd"}]}
+    configured.event_filter_blind = True
+    configured.will_grant("user-2", "other@example.test", [], event="event-x")
+    code, env = run_cli(["xero", "auth", "--timeout", "10"])
+    assert code == 1 and env["problems"][0]["code"] == "CONSENT_NOT_ONE_ORG"
+    assert list(store.load(store.TOKENS)["users"]) == ["user-1"]
+    assert tenants.registry()["t-a"]["user_id"] == "user-1"
+
+
+def test_a_name_that_matches_nothing_takes_nothing_and_removes_nothing(configured, browser, run_cli):
+    # Xero does not say what was granted, the login holds one company under this app,
+    # and the name asked for is another: that company is not taken, and not removed.
+    configured.add_org(Org("t-c", "Entity C Pty Ltd"))
+    configured.event_filter_blind = True
+    configured.will_grant("user-1", "adviser@example.test", ["t-c"])
+    code, env = run_cli(["xero", "auth", "--expect-org", "Entity D Pty Ltd", "--timeout", "10"])
+    assert code == 1 and env["problems"][0]["code"] == "CONSENT_ORG_NOT_NAMED"
+    assert "'Entity C Pty Ltd'" in env["problems"][0]["message"]
+    assert len(configured.users["user-1"]["connections"]) == 1
+    assert _token_file() is None and tenants.registry() == {}
+
+
+def test_a_sign_in_that_could_not_be_kept_alive_is_not_saved(configured, browser, run_cli):
+    configured.add_org(Org("t-a", "Entity A Pty Ltd"))
+    configured.will_grant("user-1", "adviser@example.test", ["t-a"])
+    configured.drop_from_token = {"refresh_token"}
+    code, env = run_cli(["xero", "auth", "--timeout", "10"])
+    assert code == 1 and env["problems"][0]["code"] == "SIGN_IN_INCOMPLETE"
+    assert _token_file() is None and tenants.registry() == {}
+
+
+def test_a_connection_that_names_no_organisation_is_not_saved(configured, browser, run_cli, monkeypatch):
+    from fma_tools.xero.client import XeroClient
+    configured.add_org(Org("t-a", "Entity A Pty Ltd"))
+    configured.will_grant("user-1", "adviser@example.test", ["t-a"])
+    monkeypatch.setattr(XeroClient, "connections",
+                        lambda self, *a, **k: [{"id": "c-1", "tenantName": "Entity A Pty Ltd"}])
+    code, env = run_cli(["xero", "auth", "--timeout", "10"])
+    assert code == 1 and env["problems"][0]["code"] == "SIGN_IN_INCOMPLETE"
+    assert _token_file() is None and tenants.registry() == {}
+
+
+def test_a_permission_xero_left_out_of_the_sign_in_is_said(configured, browser, run_cli):
+    configured.add_org(Org("t-a", "Entity A Pty Ltd"))
+    configured.will_grant("user-1", "adviser@example.test", ["t-a"])
+    configured.grant_without = {"accounting.reports.aged.read"}
+    code, env = run_cli(["xero", "auth", "--timeout", "10"])
+    assert code == 0, env["problems"]
+    assert any("granted the sign-in without: accounting.reports.aged.read" in w
+               for w in env["warnings"])
+
+
+def test_the_fifth_company_says_the_free_tier_is_full(configured, browser, run_cli):
+    ids = [f"t-{i}" for i in range(5)]
+    for i, t in enumerate(ids):
+        configured.add_org(Org(t, f"Entity {i} Pty Ltd"))
+    signed_in(configured, ids[:3])
+    configured.will_grant("user-1", "adviser@example.test", [ids[3]])
+    code, env = run_cli(["xero", "auth", "--timeout", "10"])
+    assert code == 0 and env["data"]["connected"] == 4
+    assert not any("per app" in w for w in env["warnings"])
+    configured.will_grant("user-1", "adviser@example.test", [ids[4]])
+    code, env = run_cli(["xero", "auth", "--timeout", "10"])
+    assert code == 0 and env["data"]["connected"] == 5
+    assert any("5 organisations are connected" in w and "holds 5 per app" in w
+               for w in env["warnings"])
+
+
+def test_a_pasted_answer_with_no_code_is_refused(configured, run_cli):
+    q, _ = _paste(configured, run_cli)
+    code, env = run_cli(["xero", "auth", "--redirect", f"{q['redirect_uri']}?state={q['state']}"])
+    assert code == 1 and env["problems"][0]["code"] == "NO_CODE"
+
+
+def test_a_pasted_consent_left_too_long_is_ended(configured, run_cli):
+    configured.add_org(Org("t-a", "Entity A Pty Ltd"))
+    configured.will_grant("user-1", "adviser@example.test", ["t-a"])
+    _, landed = _paste(configured, run_cli)
+    pending = store.load(store.PENDING)
+    pending["created_at"] -= 16 * 60
+    store.save(store.PENDING, pending)
+    code, env = run_cli(["xero", "auth", "--redirect", landed])
+    assert code == 1 and env["problems"][0]["code"] == "PENDING_CONSENT_EXPIRED"
+    assert not (store.config_dir() / store.PENDING).exists()
+    assert tenants.registry() == {}
+
+
+def test_the_paste_route_remembers_which_company_was_asked_for(configured, run_cli):
+    configured.add_org(Org("t-demo", "Demo Company (AU)"))
+    configured.will_grant("user-1", "adviser@example.test", ["t-demo"])
+    _, landed = _paste(configured, run_cli, "--expect-org", "Entity A Pty Ltd")
+    code, env = run_cli(["xero", "auth", "--redirect", landed])
+    assert code == 1 and env["problems"][0]["code"] == "CONSENT_WRONG_ORG"
+    assert tenants.registry() == {} and configured.users["user-1"]["connections"] == []
+
+
+def test_a_key_taken_while_a_pasted_consent_waited_is_not_shared(configured, run_cli):
+    configured.add_org(Org("t-a", "Entity A Pty Ltd"))
+    configured.add_org(Org("t-b", "Entity B Pty Ltd"))
+    signed_in(configured, ["t-a"])                           # A is here, with no key yet
+    configured.will_grant("user-1", "adviser@example.test", ["t-b"])
+    _, landed = _paste(configured, run_cli, "--key", "NSW")
+    assert run_cli(["xero", "accounts", "--set-key", "Entity A Pty Ltd", "NSW"])[0] == 0
+    code, env = run_cli(["xero", "auth", "--redirect", landed])
+    assert code == 0, env["problems"]
+    assert any("already names another organisation" in w for w in env["warnings"])
+    assert tenants.registry()["t-a"]["key"] == "NSW" and tenants.registry()["t-b"]["key"] is None

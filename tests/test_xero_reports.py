@@ -7,6 +7,7 @@ untitled sections holding a lone total) with invented names and figures."""
 import json
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -183,3 +184,107 @@ def test_a_blank_total_is_not_a_footing_that_passed():
     bank.lines[-1].values[0] = None                     # the total cell came back empty
     ties = {t.name: t.status for t in reports.section_ties(rep, "bs")}
     assert ties["bs: Total Bank (30 Apr 2019)"] == "not_checked"
+
+
+def _period(title: str) -> reports.Report:
+    return reports.Report(["Profit & Loss", "Entity A Pty Ltd", title], ["", "x"], [])
+
+
+def test_a_period_title_with_no_date_cannot_be_proved():
+    with pytest.raises(Refusal) as e:
+        reports.prove_range(_period("Year to date"), date(2025, 7, 1), date(2026, 6, 30), "pl")
+    assert e.value.code == "DATE_NOT_ECHOED"
+
+
+@pytest.mark.parametrize("title", [
+    "1 May 2026 to 30 June 2026",               # the end asked for, another start
+    "1 June 2026 to 31 July 2026",              # the start asked for, another end
+    "30 June 2026 to 1 June 2026",              # both dates, the wrong way round
+])
+def test_a_period_title_must_name_both_ends_as_asked(title):
+    with pytest.raises(Refusal) as e:
+        reports.prove_range(_period(title), date(2026, 6, 1), date(2026, 6, 30), "pl")
+    assert e.value.code == "DATE_MISMATCH"
+
+
+def test_a_date_inside_the_organisations_name_is_not_the_reports_date():
+    rep = reports.Report(["Balance Sheet", "Estate of J Smith 30 June 2023",
+                          "As at 30 June 2026"], ["", "x"], [])
+    reports.prove_as_at(rep, date(2026, 6, 30), "bs")           # the third line decides
+    with pytest.raises(Refusal):
+        reports.prove_as_at(rep, date(2023, 6, 30), "bs")
+
+
+@pytest.mark.parametrize("month, day", [(13, 30), (0, 30), (6, 0), (6, 32), ("June", 30)])
+def test_a_year_end_that_is_not_a_day_of_a_month_is_refused(month, day):
+    body = json.dumps({"Organisations": [{"Name": "Entity A Pty Ltd",
+                                          "FinancialYearEndMonth": month,
+                                          "FinancialYearEndDay": day}]}).encode()
+    with pytest.raises(Refusal) as e:
+        reports.parse_organisation(body)
+    assert e.value.code == "FY_END_UNKNOWN"
+
+
+def test_side_by_side_matches_accounts_by_id_not_by_name():
+    def sheet(first, second):
+        return reports.Report(["Balance Sheet", "Entity A Pty Ltd", "x"], ["", "d"], [
+            reports.Section("Bank", [
+                reports.Line("row", "Savings", [Decimal(first)], "id-1"),
+                reports.Line("row", "Savings", [Decimal(second)], "id-2")])])
+    both = reports.side_by_side(sheet(1, 2), sheet(10, 20))
+    assert [(ln.account_id, ln.values) for ln in both.sections[0].lines] == [
+        ("id-1", [Decimal(1), Decimal(10)]), ("id-2", [Decimal(2), Decimal(20)])]
+
+
+def test_a_statement_line_with_no_figure_is_not_checked_rather_than_a_crash():
+    rep = reports.parse(_balance_sheet())
+    rep.find("Net Assets").values[0] = None
+    assert reports.balance_sheet_tie(rep, "bs").status == "not_checked"
+    rep.find("Net Assets").values.clear()
+    assert reports.balance_sheet_tie(rep, "bs").status == "not_checked"
+
+
+# -- the workbook reads back as it was meant, or it is not kept -----------------------
+
+def _grid(title=("Balance Sheet",), entity="Entity A Pty Ltd", line="As at 30 June 2026"):
+    return [list(title), [entity], [line], [], ["Account", "30 Jun 2026"],
+            ["Business Bank Account", Decimal("1.00")]]
+
+
+@pytest.mark.parametrize("grid, expect, why", [
+    # the title row carries a second cell, so it does not read back as the title written
+    (_grid(title=("Balance Sheet", "stray")), {"date": "2026-06-30"}, "title"),
+    # an organisation whose name reads as a period
+    (_grid(entity="Old File to 30 June 2023"), {"date": "2026-06-30"}, "organisation"),
+    # a listing, which claims no date, under a line that reads as one
+    (_grid(), None, "a listing read back"),
+    # a period that is not the one meant
+    (_grid(line="1 July 2025 to 30 June 2026"),
+     {"start": "2025-07-01", "end": "2026-05-31"}, "period"),
+    # an as-at date that is not the one meant
+    (_grid(), {"date": "2026-05-31"}, "as-at"),
+])
+def test_a_workbook_that_does_not_read_back_as_meant_is_not_kept(tmp_path, grid, expect, why):
+    with pytest.raises(Refusal) as e:
+        layout.write_workbook(tmp_path / "x.xlsx", [("Sheet", grid)], expect)
+    assert e.value.code == "READ_BACK_MISMATCH"
+    assert why in e.value.problems[0]["message"]
+    assert list(tmp_path.iterdir()) == [], "neither the file nor its temporary copy is left"
+
+
+def test_the_same_grids_are_kept_when_they_read_back_as_meant(tmp_path):
+    info = layout.write_workbook(tmp_path / "a.xlsx", [("Sheet", _grid())],
+                                 {"date": "2026-06-30"})
+    assert info["report_date"] == "2026-06-30"
+    info = layout.write_workbook(tmp_path / "p.xlsx",
+                                 [("Sheet", _grid(line="1 July 2025 to 30 June 2026"))],
+                                 {"start": "2025-07-01", "end": "2026-06-30"})
+    assert info["report_period"] == {"start": "2025-07-01", "end": "2026-06-30"}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.xlsx", "p.xlsx"]
+
+
+def test_a_workbook_is_written_only_to_an_absolute_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(InputProblem) as e:
+        layout.write_workbook(Path("x.xlsx"), [("Sheet", _grid())], {"date": "2026-06-30"})
+    assert e.value.code == "PATH_NOT_ABSOLUTE" and list(tmp_path.iterdir()) == []

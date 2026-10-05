@@ -27,6 +27,22 @@ def _group(run_cli, pull, out, *extra, as_at=AS_AT):
                     "--out", str(out), *extra])
 
 
+def _rewrite(pull, relative, change):
+    """Change one raw response of a pull and make the record agree with the new bytes,
+    so the change itself is what a test is about and not PULL_CHANGED."""
+    import hashlib
+    doc = json.loads((pull / relative).read_text())
+    change(doc)
+    blob = json.dumps(doc).encode()
+    (pull / relative).write_bytes(blob)
+    record_path = pull / "PULL.json"
+    record = json.loads(record_path.read_text())
+    hit = [r for org in record["organisations"] for r in org["raw"] if r["file"] == relative]
+    assert len(hit) == 1, relative
+    hit[0]["sha256"] = hashlib.sha256(blob).hexdigest()
+    record_path.write_text(json.dumps(record))
+
+
 def _table(ws) -> tuple[list, dict]:
     rows = [[c.value for c in r] for r in ws.iter_rows()]
     header = rows[4]
@@ -398,3 +414,78 @@ def test_an_account_missing_from_the_chart_is_explained_as_that(pulled, run_cli,
     alone = [d for d in diffs if d[0] == "Not lined up"]
     assert len(alone) == 1 and "not in the chart that was pulled" in alone[0][3]
     assert "in B" in alone[0][3]
+
+
+def test_a_trial_balance_without_year_to_date_columns_refuses(pulled, run_cli, tmp_path):
+    def drop_ytd(doc):
+        header = doc["Reports"][0]["Rows"][0]
+        header["Cells"] = header["Cells"][:3]                 # Account, Debit, Credit
+    _rewrite(pulled, "raw/ACME_B_TrialBalance_2026-06-30.json", drop_ytd)
+    out = tmp_path / "g.xlsx"
+    code, env = _group(run_cli, pulled, out)
+    assert code == 1 and env["problems"][0]["code"] == "TRIAL_BALANCE_SHAPE"
+    assert env["problems"][0]["message"].startswith("B:") and not out.exists()
+
+
+def test_text_where_a_balance_belongs_refuses(pulled, run_cli, tmp_path):
+    def text(doc):
+        for section in doc["Reports"][0]["Rows"][1:]:
+            for row in section.get("Rows", []):
+                if row["Cells"][0]["Value"].startswith("Advertising"):
+                    row["Cells"][3]["Value"] = "n/a"            # YTD Debit
+    _rewrite(pulled, "raw/ACME_B_TrialBalance_2026-06-30.json", text)
+    out = tmp_path / "g.xlsx"
+    code, env = _group(run_cli, pulled, out)
+    assert code == 1 and env["problems"][0]["code"] == "TRIAL_BALANCE_SHAPE"
+    assert "'n/a'" in env["problems"][0]["message"] and not out.exists()
+
+
+def test_a_pull_that_records_no_organisation_is_not_a_sheet(pulled, run_cli, tmp_path):
+    record_path = pulled / "PULL.json"
+    record = json.loads(record_path.read_text())
+    record["organisations"] = []
+    record_path.write_text(json.dumps(record))
+    out = tmp_path / "g.xlsx"
+    code, env = _group(run_cli, pulled, out)
+    assert code == 1 and env["problems"][0]["code"] == "PULL_EMPTY" and not out.exists()
+
+
+def test_the_paths_are_absolute_and_the_sheet_is_an_xlsx(pulled, run_cli, tmp_path):
+    code, env = _group(run_cli, pulled, tmp_path / "g.csv")
+    assert code == 2 and env["problems"][0]["code"] == "OUT_NOT_XLSX"
+    assert not (tmp_path / "g.csv").exists()
+    code, env = run_cli(["xero", "group", "--pull", "the-pull", "--as-at", AS_AT,
+                         "--out", str(tmp_path / "g.xlsx")])
+    assert code == 2 and env["problems"][0]["code"] == "PATH_NOT_ABSOLUTE"
+    code, env = run_cli(["xero", "group", "--pull", str(pulled), "--out", str(tmp_path / "g.xlsx")])
+    assert code == 1 and env["problems"][0]["code"] == "AS_AT_REQUIRED"
+
+
+def test_a_mapping_that_says_one_account_twice_or_half_a_line_refuses(pulled, run_cli, tmp_path):
+    mapping = tmp_path / "mapping.csv"
+    out = tmp_path / "g.xlsx"
+    mapping.write_text("entity,code,group_code\nA,404,404\na,404,405\n")
+    code, env = _group(run_cli, pulled, out, "--mapping", str(mapping))
+    assert code == 1 and env["problems"][0]["code"] == "MAPPING_DUPLICATE"
+    for half in ("A,404,\n", "A,,404\n"):
+        mapping.write_text("entity,code,group_code\n" + half)
+        code, env = _group(run_cli, pulled, out, "--mapping", str(mapping))
+        assert code == 2 and env["problems"][0]["code"] == "MAPPING_INVALID", half
+        assert "line 2 has no code or no group_code" in env["problems"][0]["message"]
+    assert not out.exists()
+
+
+def test_an_archived_account_with_no_balance_is_not_a_difference(xero, run_cli, tmp_path):
+    a = xero.add_org(Org("t-a", "Entity A Pty Ltd"))
+    a.archived.append(("998", "Closed Long Ago"))            # only A ever had it
+    xero.add_org(Org("t-b", "Entity B Pty Ltd"))
+    signed_in(xero, ["t-a", "t-b"], keys={"t-a": "A", "t-b": "B"})
+    pull = tmp_path / "pull"
+    assert run_cli(["xero", "pull", "--as-at", AS_AT, "--all", "--out", str(pull)])[0] == 0
+    out = tmp_path / "g.xlsx"
+    code, env = _group(run_cli, pull, out)
+    assert code == 0 and env["data"]["differences"] == 0
+    rows = [[c.value for c in r] for r in
+            openpyxl.load_workbook(out)["Chart differences"].iter_rows(min_row=6)]
+    assert rows == [[None, None, "None found",
+                     "every code is in every organisation under one name"]]

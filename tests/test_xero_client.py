@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from fma_tools.errors import EnvProblem, Refusal
+from fma_tools.errors import EnvProblem, InputProblem, Refusal
 from fma_tools.xero import store
 from fma_tools.xero.client import XeroClient
 from xero_fakes import Org, signed_in
@@ -334,6 +334,8 @@ def test_the_guards_survive_a_test_that_undoes_its_patches(monkeypatch):
         assert Path.home() / ".config" not in store.config_dir().parents
         with pytest.raises(AssertionError):
             transport.default_transport()
+        import webbrowser
+        assert webbrowser.open.__name__ == "_no_browser", "and no real browser either"
     finally:
         pass
 
@@ -385,3 +387,45 @@ def test_a_token_answer_with_an_unreadable_lifetime_does_not_lose_the_sign_in(on
     monkeypatch.setattr(oauth, "refresh", strange)
     XeroClient().get("user-1", "t-a", "Organisation")
     assert _saved_refresh_token() in one.refresh_tokens, "the new sign-in was saved"
+
+
+def test_a_store_file_that_is_not_an_object_is_never_read_as_empty(one):
+    signed_in(one, ["t-a"])
+    (store.config_dir() / store.TOKENS).write_text("[]")
+    with pytest.raises(InputProblem) as e:
+        store.load(store.TOKENS)
+    assert e.value.code == "XERO_STORE_UNREADABLE"
+
+
+def test_the_lock_is_a_real_one(one):
+    # Two processes refreshing at once would each spend the same token, and Xero keeps
+    # only the last answer. A second holder must be kept out, not waved through.
+    import fcntl
+    with store.locked():
+        fd = os.open(store.config_dir() / ".lock", os.O_WRONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+    fd = os.open(store.config_dir() / ".lock", os.O_WRONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)        # free again once released
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def test_a_sign_in_is_stamped_with_when_it_lapses():
+    from fma_tools.xero import oauth
+    kept = oauth.stamp({"access_token": "a", "refresh_token": "r", "expires_in": 1800,
+                        "scope": "x y"}, 1_000.0)
+    assert kept == {"access_token": "a", "refresh_token": "r", "access_expires_at": 2_800.0,
+                    "refresh_issued_at": 1_000.0, "scope": "x y"}
+
+
+def test_an_answer_about_connections_that_is_not_a_list_is_exit_2(one, run_cli):
+    signed_in(one, ["t-a"], keys={"t-a": "A"})
+    one.connections_status = 200                    # a 200 that carries {} and no list
+    code, env = run_cli(["xero", "accounts"])
+    assert code == 2 and env["problems"][0]["code"] == "XERO_NOT_JSON"

@@ -134,6 +134,7 @@ uv run playwright install chromium
 uv run pytest
 ```
 
-No test reaches the network or a real sign-in: conftest points `FMA_CONFIG_DIR` at a
-temp folder and replaces the transport with a stub that raises unless a test injects
-the in-memory Xero from `tests/xero_fakes.py`.
+No test reaches the network, a real sign-in or a real browser: conftest points
+`FMA_CONFIG_DIR` at a temp folder, replaces the transport with a stub that raises
+unless a test injects the in-memory Xero from `tests/xero_fakes.py`, and fails any test
+that reaches for a browser it did not stub.

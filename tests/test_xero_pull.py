@@ -114,6 +114,41 @@ def test_keys_that_make_the_same_file_name_refuse_before_anything_is_fetched(two
 def test_a_relative_out_is_exit_2(two, run_cli):
     code, env = run_cli(["xero", "pull", "--as-at", AS_AT, "--all", "--out", "pull-here"])
     assert code == 2 and env["problems"][0]["code"] == "PATH_NOT_ABSOLUTE"
+    assert not two.api_calls(), "refused before Xero is asked, not at the first write"
+
+
+def test_out_must_be_given_and_be_a_folder_that_can_exist(two, run_cli, tmp_path):
+    code, env = run_cli(["xero", "pull", "--as-at", AS_AT, "--all"])
+    assert code == 2 and env["problems"][0]["code"] == "OUT_REQUIRED"
+    a_file = tmp_path / "notes.txt"
+    a_file.write_text("not a folder")
+    code, env = _pull(run_cli, a_file)
+    assert code == 2 and env["problems"][0]["code"] == "OUT_NOT_A_FOLDER"
+    code, env = _pull(run_cli, tmp_path / "missing" / "p")
+    assert code == 2 and env["problems"][0]["code"] == "OUT_PARENT_MISSING"
+    assert not two.api_calls()
+
+
+def test_reports_that_do_not_exist_are_exit_2(two, run_cli, tmp_path):
+    for bad in ("tb,nonsense", ","):
+        code, env = _pull(run_cli, tmp_path / "p", "--reports", bad)
+        assert code == 2 and env["problems"][0]["code"] == "REPORTS_INVALID", bad
+    assert not two.api_calls()
+
+
+def test_all_and_a_named_organisation_together_is_a_refusal(two, run_cli, tmp_path):
+    code, env = run_cli(["xero", "pull", "--as-at", AS_AT, "--all", "--org", "A",
+                         "--out", str(tmp_path / "p")])
+    assert code == 1 and env["problems"][0]["code"] == "ORG_REQUIRED"
+    assert not two.api_calls()
+
+
+def test_a_pull_with_nothing_connected_says_how_to_connect(xero, run_cli, tmp_path):
+    out = tmp_path / "p"
+    code, env = run_cli(["xero", "pull", "--as-at", AS_AT, "--all", "--out", str(out)])
+    assert code == 1 and env["problems"][0]["code"] == "ORG_NONE_CONNECTED"
+    assert "fma xero auth" in env["problems"][0]["message"]
+    assert not out.exists()
 
 
 def test_a_folder_that_already_holds_files_refuses(two, run_cli, tmp_path):
@@ -225,7 +260,10 @@ def test_every_call_names_its_organisation_and_asks_for_json(two, run_cli, tmp_p
         assert method == "GET"
         assert headers["Xero-Tenant-Id"] in ("t-a", "t-b"), url
         assert headers["Accept"] == "application/json"
-    assert "standardLayout=true" in next(u for _, u, _ in calls if "BalanceSheet" in u)
+    statements = [u for _, u, _ in calls if "BalanceSheet" in u or "ProfitAndLoss" in u]
+    assert len(statements) == 2 * (1 + 3)
+    assert all("standardLayout=true" in u for u in statements), \
+        "a layout saved on screen regroups the lines the ties lean on"
 
 
 def test_compare_sets_two_dates_side_by_side(xero, run_cli, tmp_path):
@@ -370,6 +408,58 @@ def test_a_total_that_does_not_foot_writes_nothing_and_names_every_break(two, ru
     assert "A Balance Sheet: Total Bank" in messages and "apart by -10.00" in messages
     assert "B Profit and Loss" in messages and "Total Income" in messages
     assert not out.exists(), "one break anywhere and the folder is left as it was"
+
+
+def test_net_assets_that_disagree_with_equity_refuse(two, run_cli, tmp_path):
+    two.bend_total[("t-a", "bs", "Net Assets")] = 5
+    out = tmp_path / "p"
+    code, env = _pull(run_cli, out)
+    assert code == 1
+    assert any("A Balance Sheet: Net Assets = Total Equity" in p["message"]
+               for p in env["problems"])
+    assert not out.exists()
+
+
+def test_a_bank_summary_that_does_not_foot_refuses(two, run_cli, tmp_path):
+    two.bend_total[("t-a", "bank", "Total")] = 3
+    code, env = _pull(run_cli, tmp_path / "p")
+    assert code == 1
+    assert any("A Bank Summary: Total (Closing Balance)" in p["message"]
+               for p in env["problems"])
+
+
+def test_the_compare_date_is_proved_too(two, run_cli, tmp_path):
+    two.skew_title[("t-a", "bs", "2026-05-31")] = "As at 30 April 2026"
+    out = tmp_path / "p"
+    code, env = _pull(run_cli, out, "--compare", "2026-05-31")
+    assert code == 1 and env["problems"][0]["code"] == "DATE_MISMATCH"
+    assert "A Balance Sheet (2026-05-31)" in env["problems"][0]["message"]
+    assert not out.exists()
+
+
+def test_the_compare_date_must_foot_and_agree_too(two, run_cli, tmp_path):
+    two.bend_total[("t-a", "bs", "Total Bank", "2026-05-31")] = 10
+    two.bend_total[("t-b", "bs", "Net Assets", "2026-05-31")] = 5
+    out = tmp_path / "p"
+    code, env = _pull(run_cli, out, "--compare", "2026-05-31")
+    assert code == 1
+    messages = " | ".join(p["message"] for p in env["problems"])
+    assert "A Balance Sheet (2026-05-31): Total Bank" in messages
+    assert "B Balance Sheet (2026-05-31): Net Assets = Total Equity" in messages
+    assert "A Balance Sheet: Total Bank" not in messages, "the as-at date itself footed"
+    assert not out.exists()
+
+
+def test_a_tie_that_could_not_run_is_said_in_the_answer_and_in_the_record(two, run_cli, tmp_path):
+    two.text_cell[("t-a", "bs", "Business Bank Account")] = "-"
+    out = tmp_path / "p"
+    code, env = _pull(run_cli, out)
+    assert code == 0, env["problems"]
+    said = [w for w in env["warnings"] if "not checked" in w]
+    assert len(said) == 1 and "A Balance Sheet: Total Bank" in said[0]
+    a = env["data"]["organisations"][0]
+    assert a["key"] == "A" and a["ties"]["not_checked"] == 1
+    assert "not checked: A Balance Sheet: Total Bank" in (out / "PULL.md").read_text()
 
 
 def test_profit_that_disagrees_with_current_year_earnings_refuses(two, run_cli, tmp_path):

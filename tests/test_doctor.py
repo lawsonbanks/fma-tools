@@ -81,6 +81,13 @@ def test_a_sign_in_file_others_can_read_fails_and_fix_repairs_it(run_cli):
     code, env = run_cli(["doctor", "--fix"])
     assert _by_name(env)["xero folder is private"]["status"] == "ok"
     assert stat.S_IMODE(app.stat().st_mode) == 0o600
+    # and the folder itself, which is what keeps the file names from other accounts
+    os.chmod(store.config_dir(), 0o755)
+    code, env = run_cli(["doctor"])
+    private = _by_name(env)["xero folder is private"]
+    assert code == 3 and private["status"] == "FAIL" and "755, want 700" in private["detail"]
+    run_cli(["doctor", "--fix"])
+    assert stat.S_IMODE(store.config_dir().stat().st_mode) == 0o700
 
 
 def test_a_lapsed_sign_in_fails_with_the_auth_fix(xero, run_cli):

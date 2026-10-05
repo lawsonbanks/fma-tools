@@ -29,17 +29,38 @@ from fma_tools.xero import transport as _xero_transport  # noqa: E402
 
 _xero_transport._FACTORY = _no_network
 
+# The same floor under the browser. `fma xero auth` opens Xero's consent page; a test
+# whose refusal has regressed must not open a real one on the Mac that runs the suite.
+import webbrowser as _webbrowser  # noqa: E402
+
+_browser_reached: list = []
+
+
+def _no_browser(url, *args, **kwargs):
+    _browser_reached.append(url)
+    return False
+
+
+_webbrowser.open = _no_browser
+
 
 @pytest.fixture(autouse=True)
 def _xero_cannot_reach_anything_real(tmp_path_factory, monkeypatch):
-    """Two guards, on for every test in the suite.
+    """Three guards, on for every test in the suite.
 
-    `fma xero` is the one tool with state and a network. A test that forgot to inject a
-    fake would otherwise spend a real refresh token -- which Xero replaces on use, so a
-    careless test run could end a live sign-in -- or call a client's ledger. So the
-    sign-in folder is a fresh temp folder, and the real transport refuses to exist."""
+    `fma xero` is the one tool with state, a network and a browser. A test that forgot
+    to inject a fake would otherwise spend a real refresh token -- which Xero replaces
+    on use, so a careless test run could end a live sign-in -- or call a client's
+    ledger, or open Xero's sign-in page on the Mac running the suite. So the sign-in
+    folder is a fresh temp folder, the real transport refuses to exist, and a browser
+    that is reached for fails the test that reached."""
     monkeypatch.setenv("FMA_CONFIG_DIR", str(tmp_path_factory.mktemp("fma-config")))
     monkeypatch.setattr(_xero_transport, "_FACTORY", _no_network)
+    monkeypatch.setattr(_webbrowser, "open", _no_browser)
+    _browser_reached.clear()
+    yield
+    assert not _browser_reached, ("a test reached for a real browser; stub "
+                                  "fma_tools.xero.main.webbrowser.open")
 
 
 @pytest.fixture

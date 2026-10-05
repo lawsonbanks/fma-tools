@@ -136,8 +136,12 @@ class FakeXero:
     event_filter_blind: bool = False                   # ?authEventId= matches nothing
     connections_status: int | None = None              # force the answer to GET /connections
     no_scope_for: set = field(default_factory=set)     # path fragments answered 401
+    # Both may carry a date as a last element, to bend one date of a comparison only.
     skew_title: dict = field(default_factory=dict)     # (tenant, report) -> title line
     bend_total: dict = field(default_factory=dict)     # (tenant, report, label) -> delta
+    text_cell: dict = field(default_factory=dict)      # (tenant, "bs", label) -> cell text
+    drop_from_token: set = field(default_factory=set)  # fields left out of a new sign-in
+    grant_without: set = field(default_factory=set)    # scopes Xero quietly does not grant
     one_sided: dict = field(default_factory=dict)      # tenant -> a debit with no credit
     day_remaining: int | None = 995
     before_api: object = None                          # called before each API answer
@@ -162,9 +166,11 @@ class FakeXero:
         self.access[access] = user_id
         self.refresh_tokens[refresh] = user_id
         self.issued += [access, refresh]
-        return {"access_token": access, "refresh_token": refresh, "expires_in": 1800,
-                "token_type": "Bearer", "scope": " ".join(oauth.SCOPES),
-                "id_token": jwt({"email": email, "xero_userid": user_id})}
+        granted = [s for s in oauth.SCOPES if s not in self.grant_without]
+        tok = {"access_token": access, "refresh_token": refresh, "expires_in": 1800,
+               "token_type": "Bearer", "scope": " ".join(granted),
+               "id_token": jwt({"email": email, "xero_userid": user_id})}
+        return {k: v for k, v in tok.items() if k not in self.drop_from_token}
 
     # -- the transport ---------------------------------------------------------------
 
@@ -262,11 +268,15 @@ class FakeXero:
 
     # -- the books -------------------------------------------------------------------
 
-    def _bent(self, org, report, label, amount: Decimal) -> Decimal:
-        return amount + D(self.bend_total.get((org.tenant_id, report, label), 0))
+    def _bent(self, org, report, label, amount: Decimal, when: str | None = None) -> Decimal:
+        delta = self.bend_total.get((org.tenant_id, report, label, when),
+                                    self.bend_total.get((org.tenant_id, report, label), 0))
+        return amount + D(delta)
 
-    def _titles(self, org, report, name, line) -> list:
-        return [name, org.name, self.skew_title.get((org.tenant_id, report), line)]
+    def _titles(self, org, report, name, line, when: str | None = None) -> list:
+        said = self.skew_title.get((org.tenant_id, report, when),
+                                   self.skew_title.get((org.tenant_id, report), line))
+        return [name, org.name, said]
 
     def _body(self, org: Org, path: str, q: dict) -> bytes | None:
         if path == "Organisation":
@@ -341,13 +351,14 @@ class FakeXero:
         aid = org.account_id
 
         def rows(group):
-            return [_row(n, [D(a)], aid(c, n)) for c, n, a in getattr(b, group)]
+            return [_row(n, [self.text_cell.get((org.tenant_id, "bs", n), D(a))], aid(c, n))
+                    for c, n, a in getattr(b, group)]
         assets = b.total("bank") + b.total("current_assets")
-        cye = self._bent(org, "bs", "Current Year Earnings", b.net_profit)
+        cye = self._bent(org, "bs", "Current Year Earnings", b.net_profit, when)
         sections = [
             _section("Assets", []),
             _section("Bank", rows("bank") + [
-                _row("Total Bank", [self._bent(org, "bs", "Total Bank", b.total("bank"))],
+                _row("Total Bank", [self._bent(org, "bs", "Total Bank", b.total("bank"), when)],
                      kind="SummaryRow")]),
             _section("Current Assets", rows("current_assets") + [
                 _row("Total Current Assets", [b.total("current_assets")], kind="SummaryRow")]),
@@ -358,14 +369,15 @@ class FakeXero:
                      kind="SummaryRow")]),
             _section("", [_row("Total Liabilities", [b.total("current_liabilities")],
                                kind="SummaryRow")]),
-            _section("", [_row("Net Assets", [self._bent(org, "bs", "Net Assets", b.net_assets)])]),
+            _section("", [_row("Net Assets", [self._bent(org, "bs", "Net Assets", b.net_assets,
+                                                         when)])]),
             _section("Equity", [
                 _row("Current Year Earnings", [cye]),
                 _row("Retained Earnings", [b.retained], aid("960")),
                 _row("Total Equity", [cye + b.retained], kind="SummaryRow")]),
         ]
         d = date.fromisoformat(when)
-        return _report(self._titles(org, "bs", "Balance Sheet", f"As at {long_date(d)}"),
+        return _report(self._titles(org, "bs", "Balance Sheet", f"As at {long_date(d)}", when),
                        ["", _short(d)], sections)
 
     def _profit_and_loss(self, org, start, end) -> bytes:
@@ -402,7 +414,8 @@ class FakeXero:
             rows.append(_row(n, [D(amt) - 1000, D(3000), D(2000), D(amt)], org.account_id(c, n)))
             closing += D(amt)
         n = len(books.bank)
-        rows.append(_row("Total", [closing - 1000 * n, D(3000 * n), D(2000 * n), closing],
+        rows.append(_row("Total", [closing - 1000 * n, D(3000 * n), D(2000 * n),
+                                   self._bent(org, "bank", "Total", closing)],
                          kind="SummaryRow"))
         line = f"From {long_date(a)} to {long_date(b_)}"
         return _report(self._titles(org, "bank", "Bank Summary", line),
