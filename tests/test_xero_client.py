@@ -465,3 +465,51 @@ def test_a_store_shared_on_purpose_is_not_failed_for_its_modes(one, run_cli):
     check = {c["check"]: c for c in env["data"]["checks"]}["xero folder is private"]
     assert check["status"] == "ok" and "shared store by choice" in check["detail"]
     assert run_cli(["xero", "accounts"])[0] == 0
+
+
+# -- a sandbox whose network rule refuses Xero -----------------------------------------
+
+def test_a_refused_tunnel_is_told_apart_and_nothing_else_of_the_message_is_kept(monkeypatch):
+    import socket
+    import urllib.error
+    import urllib.request
+    from fma_tools.xero import transport
+
+    def failing(reason):
+        def down(req, timeout=None, context=None):
+            raise urllib.error.URLError(reason)
+        monkeypatch.setattr(urllib.request, "urlopen", down)
+        with pytest.raises(transport.TransportError) as e:
+            transport.UrllibTransport().request("GET", "https://example.test/x?code=SECRET", {})
+        return str(e.value)
+    # how a proxy that will not let the address through looks from inside
+    assert failing(OSError("Tunnel connection failed: 403 Forbidden")) == \
+        "URLError: Tunnel connection failed: 403"
+    assert failing(socket.gaierror(-3, "Temporary failure in name resolution")) == \
+        "URLError: gaierror"
+    said = failing(OSError("could not send Bearer SECRET to https://example.test/x?code=SECRET"))
+    assert said == "URLError: OSError" and "SECRET" not in said
+
+
+def test_a_network_that_may_not_reach_xero_says_which_setting_not_try_again(one, run_cli):
+    signed_in(one, ["t-a"], keys={"t-a": "A"})
+    one.transport_down = "URLError: Tunnel connection failed: 403"
+    code, env = run_cli(["xero", "accounts"])
+    assert code == 3 and env["problems"][0]["code"] == "XERO_UNREACHABLE"
+    fix = env["problems"][0]["fix"]
+    assert "api.xero.com" in fix and "identity.xero.com" in fix and "new session" in fix
+    assert "run the same command again" not in fix
+    # and the sign-in is not blamed for it
+    assert env["data"]["organisations"][0]["status"] == "Xero not reachable"
+    one.transport_down = True                       # an ordinary outage keeps the plain fix
+    code, env = run_cli(["xero", "accounts"])
+    assert env["problems"][0]["fix"] == "check the network, then run the same command again"
+    assert env["data"]["organisations"][0]["status"] == "Xero not reachable"
+
+
+def test_a_refused_tunnel_at_refresh_time_says_the_same(one):
+    signed_in(one, ["t-a"], expired=True)
+    one.transport_down = "URLError: Tunnel connection failed: 403"
+    with pytest.raises(EnvProblem) as e:
+        XeroClient().get("user-1", "t-a", "Organisation")
+    assert e.value.code == "XERO_UNREACHABLE" and "api.xero.com" in e.value.problems[0]["fix"]

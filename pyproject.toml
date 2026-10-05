@@ -1,6 +1,6 @@
 [project]
 name = "fma-tools"
-version = "0.5.0"
+version = "0.5.1"
 description = "FMA delivery gates: read-ledger, reconcile, render, xero, doctor."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from ..errors import EnvProblem, InputProblem, Refusal, ToolError
 from . import group as group_mod
 from . import oauth, pull as pull_mod, store, tenants
-from .client import NETWORK_FIX, XeroClient
+from .client import XeroClient, network_fix
 from .transport import default_transport
 
 class _CodeUnspent(EnvProblem):
@@ -268,7 +268,7 @@ def _complete(answer: dict, state: str, verifier: str, port: int, client_id: str
                       "and for five minutes; run the command again.")
     except oauth.TokenUnavailable as e:
         raise _CodeUnspent("XERO_UNREACHABLE", f"could not reach Xero to finish the "
-                                               f"sign-in ({e})", fix=NETWORK_FIX)
+                                               f"sign-in ({e})", fix=network_fix(e))
 
     access = oauth.claims(tok.get("access_token"))
     event = access.get("authentication_event_id")
@@ -517,12 +517,15 @@ def _accounts(args) -> tuple[dict, list[str]]:
     client = XeroClient()
     now = time.time()
     live: dict = {}                 # user id -> {tenant id: connection row}
+    unreachable: set = set()        # logins Xero could not be asked about at all
     problems, warnings = [], []
     for uid in users:
         try:
             live[uid] = {str(c.get("tenantId")): c for c in client.connections(uid)}
         except EnvProblem as e:
             problems += e.problems
+            if e.code == "XERO_UNREACHABLE":
+                unreachable.add(uid)
     users = {u: v for u, v in (store.load(store.TOKENS).get("users") or {}).items()
              if u in needed}                                  # refresh may have rotated
     listed = []
@@ -531,7 +534,9 @@ def _accounts(args) -> tuple[dict, list[str]]:
         user = users.get(uid) or {}
         age = (now - float(user.get("refresh_issued_at", 0))) / 86400 if user else None
         if uid not in live:
-            status = "sign-in not usable"
+            # an outage, or a network that may not reach Xero, says nothing about the
+            # sign-in; calling it unusable would send someone to renew a good one
+            status = "Xero not reachable" if uid in unreachable else "sign-in not usable"
             if uid not in users:
                 problems.append({"code": "XERO_NOT_SIGNED_IN",
                                  "message": f"{tenants.key_of(r)} ({r.get('name')}) has no "
@@ -547,7 +552,8 @@ def _accounts(args) -> tuple[dict, list[str]]:
             status = "live"
         listed.append({"key": tenants.key_of(r), "name": r.get("name"),
                        "status": status, "authorised_by": r.get("authorised_by") or "",
-                       "sign_in_refreshed_days_ago": None if age is None else round(age, 1),
+                       "sign_in_refreshed_days_ago": (None if age is None
+                                                      else round(max(age, 0.0), 1)),
                        "tenant_id": tid})
     registered = set(rows)
     others = sorted({str(c.get("tenantName")) for conns in live.values()

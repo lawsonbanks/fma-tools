@@ -35,6 +35,17 @@ CONNECTIONS = "https://api.xero.com/connections"
 _MINUTE_LIMIT = 60
 _MAX_429_RETRIES = 4
 NETWORK_FIX = "check the network, then run the same command again"
+SANDBOX_FIX = ("this session's network is not allowed to reach Xero. In Claude's settings "
+               "(Capabilities, network egress) allow api.xero.com and identity.xero.com, or "
+               "all domains; quit and reopen the app; then run the same command in a new "
+               "session")
+
+
+def network_fix(detail) -> str:
+    """A proxy that refuses the tunnel is a sandbox's network rule, not an outage:
+    running the same command again will not cure it, and the fix line must say what
+    will."""
+    return SANDBOX_FIX if "Tunnel connection failed" in str(detail) else NETWORK_FIX
 
 
 def _json(body: bytes):
@@ -103,7 +114,7 @@ class XeroClient:
             except oauth.TokenUnavailable as e:
                 raise EnvProblem("XERO_UNREACHABLE",
                                  f"could not reach Xero to refresh the sign-in ({e})",
-                                 fix=NETWORK_FIX)
+                                 fix=network_fix(e))
             stamped = oauth.stamp(fresh, self.clock())
             if not stamped["refresh_token"]:
                 # Xero always rotates; if an answer ever came without one, the token
@@ -136,7 +147,7 @@ class XeroClient:
             return self.transport.request(method, url, headers, None, 30)
         except TransportError as e:
             raise EnvProblem("XERO_UNREACHABLE", f"could not reach Xero ({e})",
-                             fix=NETWORK_FIX)
+                             fix=network_fix(e))
 
     def _pace(self, tenant_id: str) -> None:
         now = self.clock()
