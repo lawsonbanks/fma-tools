@@ -484,9 +484,34 @@ def _disconnect(args) -> tuple[dict, list[str]]:
     if not args.org:
         raise Refusal("ORG_REQUIRED", "say which organisation: --org <key>")
     rows = tenants.registry()
-    tid = tenants.find(args.org, rows)
-    row = rows[tid]
     client = XeroClient()
+    try:
+        tid = tenants.find(args.org, rows)
+    except Refusal as unknown:
+        if unknown.code != "ORG_UNKNOWN":
+            raise
+        # Not held here -- but it may be connected at Xero all the same (a consent
+        # that was refused and could not be undone), holding one of the app's places.
+        # Named in full, it can be let go from this side too.
+        wanted = args.org.strip().casefold()
+        strays = []
+        for uid in {r.get("user_id") for r in rows.values() if r.get("user_id")}:
+            try:
+                strays += [(uid, c) for c in client.connections(uid)
+                           if str(c.get("tenantId")) not in rows
+                           and (c.get("tenantName") or "").casefold() == wanted]
+            except EnvProblem:
+                continue
+        if len(strays) != 1 or not strays[0][1].get("id"):
+            raise unknown
+        uid, conn = strays[0]
+        client.disconnect(uid, conn["id"])
+        return ({"action": "disconnect",
+                 "organisation": {"key": "(not held here)", "name": conn.get("tenantName")},
+                 "connected": len(rows), "cap": tenants.FREE_TIER_CAP},
+                ["that organisation was connected at Xero but not held on this Mac; its "
+                 "connection has been removed"])
+    row = rows[tid]
     warnings: list[str] = []
     if row.get("connection_id"):
         try:

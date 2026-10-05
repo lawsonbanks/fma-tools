@@ -655,3 +655,22 @@ def test_a_renewal_says_what_else_that_login_holds_but_takes_none_of_it(configur
     assert code == 0 and env["data"]["step"] == "renewed"
     assert sorted(tenants.registry()) == ["t-a"], "an unnamed organisation is not taken"
     assert any("'Demo Company (AU)'" in w and "not held here" in w for w in env["warnings"])
+
+
+def test_a_stray_connection_can_be_let_go_from_this_side(xero, run_cli):
+    xero.add_org(Org("t-a", "Entity A Pty Ltd"))
+    xero.add_org(Org("t-x", "Demo Company (AU)"))
+    signed_in(xero, ["t-a"], keys={"t-a": "A"})
+    xero.users["user-1"]["connections"].append(
+        {"id": "conn-x", "authEventId": "old", "tenantId": "t-x",
+         "tenantType": "ORGANISATION", "tenantName": "Demo Company (AU)"})
+    assert run_cli(["xero", "accounts"])[1]["data"]["connected_at_xero"] == 2
+    code, env = run_cli(["xero", "disconnect", "--org", "Demo"])        # part of a name
+    assert code == 1 and env["problems"][0]["code"] == "ORG_UNKNOWN"
+    code, env = run_cli(["xero", "disconnect", "--org", "demo company (au)"])
+    assert code == 0, env["problems"]
+    assert any("not held on this Mac" in w for w in env["warnings"])
+    assert [c["tenantId"] for c in xero.users["user-1"]["connections"]] == ["t-a"]
+    assert sorted(tenants.registry()) == ["t-a"]
+    code, env = run_cli(["xero", "accounts"])
+    assert code == 0 and env["data"]["connected_at_xero"] == 1

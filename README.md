@@ -76,7 +76,9 @@ fma xero accounts            # what is connected; is each sign-in alive
 `fma xero auth --redirect '<the address the browser landed on>'` finishes it.
 
 An organisation is always named in full, by its key or its Xero name: part of a name
-never matches, and a name two organisations share is a refusal that lists both.
+never matches, and a name two organisations share is a refusal that lists both. If Xero
+does not say which organisation a consent granted, nothing is guessed: the refusal
+lists what that login holds, and `--expect-org "<its name>"` takes the one meant.
 
 **Every time.**
 
@@ -121,7 +123,8 @@ can change a ledger); Xero's free developer tier holds five organisations per ap
 1,000 calls per organisation per day; an unused sign-in lapses after 60 days and any
 pull or `fma xero accounts` keeps it alive; once lapsed, `fma xero auth` and one sign-in
 renews every organisation that login holds; `fma xero disconnect --org <key>` withdraws
-one organisation from this side.
+one organisation from this side, and lets go of a connection Xero still holds for the
+app but this Mac does not when it is named in full.
 
 ## Develop
 
