@@ -177,7 +177,8 @@ class FakeXero:
     def request(self, method, url, headers, data=None, timeout=30) -> Response:
         self.log.append((method, url, dict(headers)))
         if self.transport_down:
-            raise TransportError("URLError")
+            raise TransportError(self.transport_down if isinstance(self.transport_down, str)
+                                 else "URLError")
         if url == oauth.TOKEN_URL:
             return self._token(urllib.parse.parse_qs((data or b"").decode()))
         token = (headers.get("Authorization") or "").removeprefix("Bearer ")

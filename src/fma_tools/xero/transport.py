@@ -9,6 +9,7 @@ raises, so no test can reach the network or a real sign-in by accident.
 from __future__ import annotations
 
 import http.client
+import re
 import ssl
 import urllib.error
 import urllib.request
@@ -31,6 +32,22 @@ class Response:
 class TransportError(Exception):
     """The request never produced an HTTP response. Carries the kind of failure only:
     never the address's query, a header or a body."""
+
+
+_TUNNEL_REFUSED = re.compile(r"Tunnel connection failed: \d{3}")
+
+
+def _kind(e: BaseException) -> str:
+    """The kind of failure and, for a URLError, the kind beneath it. A proxy that
+    refuses the tunnel says so in a fixed phrase with a status code, and that phrase is
+    kept: it is how a sandbox's network rule looks from inside, and it is not cured by
+    waiting. Nothing else of any message is kept."""
+    name = type(e).__name__
+    reason = getattr(e, "reason", None)
+    if isinstance(reason, BaseException):
+        refused = _TUNNEL_REFUSED.search(str(reason))
+        return f"{name}: {refused.group(0) if refused else type(reason).__name__}"
+    return name
 
 
 class UrllibTransport:
@@ -60,7 +77,7 @@ class UrllibTransport:
             # http.client's own failures (a response cut off mid-body, a status line
             # that is not one) are not OSErrors; left to escape they would read as a
             # bug in this tool rather than a connection that failed.
-            raise TransportError(type(e).__name__) from None
+            raise TransportError(_kind(e)) from None
 
 
 _FACTORY = UrllibTransport
