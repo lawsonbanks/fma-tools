@@ -147,11 +147,12 @@ fsync is survived; one session at a time is then the rule. Keep one sign-in per 
 it is used: a Mac's own store and a shared store each get their own Allow, so neither
 spends the other's rotating token.
 
-The agent's install needs no heavy dependency and any Python from 3.10:
+The agent's install needs no heavy dependency and any Python from 3.10. In this order,
+pip has nothing to complain about:
 
 ```sh
-python3 -m pip install --no-deps https://github.com/lawsonbanks/fma-tools/archive/refs/heads/main.zip
 python3 -m pip install openpyxl certifi jsonschema
+python3 -m pip install --no-deps https://github.com/lawsonbanks/fma-tools/archive/refs/heads/main.zip
 python3 -m fma_tools.cli xero accounts
 ```
 
